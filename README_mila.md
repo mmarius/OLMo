@@ -21,7 +21,8 @@ Run the following to download the training data for OLMo:
 ```bash 
 FILE_PATHS=./training_data/data_paths.csv
 OUTPUT_DIR=/change/me/to/your/output/dir
-bash ./bash_scripts/download_data.sh $FILE_PATHS $OUTPUT_DIR 
+PARALLEL_DOWNLOADS=4
+bash ./bash_scripts/download_data.sh $FILE_PATHS $OUTPUT_DIR $PARALLEL_DOWNLOADS
 ```
 
 ## Download pre-trained checkpoints
