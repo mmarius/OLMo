@@ -2,7 +2,7 @@ import logging
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, replace
 from math import cos, pi, sqrt
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, Literal
 
 import torch
 import torch.distributed as dist
@@ -26,6 +26,7 @@ __all__ = [
     "MaxScheduler",
     "ConstantScheduler",
     "CosLinearEnvelope",
+    "ConstantWithDecayWithWarmupScheduler",
     "BoltOnWarmupScheduler",
     "build_optimizer",
     "build_scheduler",
@@ -792,6 +793,7 @@ class ConstantScheduler(Scheduler):
 @dataclass
 class CosLinearEnvelope(Scheduler):
     "Pointwise product of cosine schedule and linear decay; useful during annealing."
+
     warmup_steps: int
     alpha_f: float = 0.1
     t_max: Optional[int] = None
@@ -821,6 +823,54 @@ class ConstantWithWarmupScheduler(Scheduler):
             return self._linear_warmup(initial_lr, step, self.warmup_steps)
         del max_steps
         return initial_lr
+
+
+@dataclass
+class ConstantWithDecayWithWarmupScheduler(Scheduler):
+    warmup_steps: int
+    decay_steps: int
+    decay_type: Literal["linear", "cosine", "sqrt"]
+
+    def _decay_function(self, x: float) -> float:
+        """Calculate decay factor based on selected decay type."""
+        if self.decay_type == "linear":
+            return 1 - x
+        elif self.decay_type == "cosine":
+            return (1 + cos(pi * x)) / 2
+        else:  # sqrt
+            return 1 - sqrt(x)
+
+    def get_lr(self, initial_lr: float, step: int, max_steps: int) -> float:
+        """
+        Compute learning rate for current step.
+
+        Args:
+            initial_lr: Base learning rate.
+            step: Current training step.
+            max_steps: Total number of training steps.
+
+        Returns:
+            float: Learning rate for current step.
+        """
+        if step < self.warmup_steps:
+            # Warmup phase - use parent class's linear warmup implementation
+            return self._linear_warmup(initial_lr, step, self.warmup_steps)
+
+        elif step <= max_steps - self.decay_steps:
+            # Constant phase
+            return initial_lr
+
+        elif step < max_steps:
+            # Decay phase
+            x = (step - (max_steps - self.decay_steps)) / self.decay_steps
+            decay_factor = self._decay_function(x)
+            return initial_lr * decay_factor
+
+        else:
+            # After max_steps, maintain the final learning rate
+            x = 1.0
+            decay_factor = self._decay_function(x)
+            return initial_lr * decay_factor
 
 
 PARAM_GROUP_FIELDS = ("sharded", "max_grad_norm", "max_grad_norm_ratio", "param_names")
@@ -1035,6 +1085,17 @@ def build_scheduler(cfg: TrainConfig, sched_cfg: Optional[SchedulerConfig] = Non
             grad_clip_warmup_factor=sched_cfg.grad_clip_warmup_factor,
             warmup_min_lr=sched_cfg.warmup_min_lr,
             warmup_steps=int(sched_cfg.t_warmup),
+        )
+    elif sched_cfg.name == SchedulerType.constant_with_decay_with_warmup:
+        return ConstantWithDecayWithWarmupScheduler(
+            grad_clip_warmup_steps=(
+                None if sched_cfg.grad_clip_warmup_steps is None else int(sched_cfg.grad_clip_warmup_steps)
+            ),
+            grad_clip_warmup_factor=sched_cfg.grad_clip_warmup_factor,
+            warmup_min_lr=sched_cfg.warmup_min_lr,
+            warmup_steps=int(sched_cfg.t_warmup),
+            decay_steps=int(sched_cfg.t_decay),
+            decay_type=sched_cfg.decay_type,
         )
     else:
         raise NotImplementedError

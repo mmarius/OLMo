@@ -558,6 +558,7 @@ class SchedulerType(StrEnum):
     constant = "constant"
     cosine_linear_envelope = "cosine_linear_envelope"
     constant_with_warmup = "constant_with_warmup"
+    constant_with_decay_with_warmup = "constant_with_decay_with_warmup"
 
 
 class SchedulerUnits(StrEnum):
@@ -572,6 +573,8 @@ class SchedulerConfig(BaseConfig):
     t_warmup: Union[int, float] = 100
     t_max: Optional[Union[int, float]] = None
     alpha_f: float = 0.1
+    t_decay: Optional[Union[int, float]] = None
+    decay_type: str = "linear"
 
     grad_clip_warmup_steps: Optional[Union[int, float]] = None
     """
