@@ -1109,6 +1109,7 @@ class Trainer:
         if self.cfg.load_path is not None and self.global_step > 0 and self.cfg.eval_on_load:
             eval_metrics = self.eval()
             if wandb.run is not None:
+                eval_metrics["global_step"] = self.global_step
                 wandb.log(eval_metrics, step=self.global_step)
 
         # Set model to 'train' mode.
@@ -1124,6 +1125,7 @@ class Trainer:
         if sys_metrics:
             self.log_metrics_to_console("Pre-train system metrics", sys_metrics)
             if wandb.run is not None:
+                sys_metrics["global_step"] = 0
                 wandb.log(sys_metrics, step=0)
 
         # Python Profiler stuff
@@ -1194,6 +1196,7 @@ class Trainer:
                     self.global_step += 1
                     self.global_train_examples_seen_this_epoch += global_batch_size
                     self.global_train_tokens_seen += global_batch_size * seq_len
+
                     speed_monitor.batch_start(
                         global_total_tokens=self.global_train_tokens_seen,
                         device_batch_num_tokens=batch_size * seq_len,  # num tokens in batch for this device
@@ -1234,6 +1237,7 @@ class Trainer:
                         and self.cfg.wandb is not None
                         and self.global_step % self.cfg.wandb.log_interval == 0
                     ):
+                        metrics["global_step"] = self.global_step
                         wandb.log(metrics, step=self.global_step)
 
                     # Check if/when run should be canceled.
@@ -1300,6 +1304,7 @@ class Trainer:
 
                         # Log metrics to W&B.
                         if wandb.run is not None:
+                            eval_metrics["global_step"] = self.global_step
                             wandb.log(eval_metrics, step=self.global_step)
 
                         # Reset speed monitor so that we don't count the time taken to run evaluations.
