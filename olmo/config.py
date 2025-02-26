@@ -671,6 +671,7 @@ class WandbConfig(BaseConfig):
     log_artifacts: bool = False
     rank_zero_only: bool = True
     log_interval: int = 1
+    resume: Optional[str] = None
 
 
 @dataclass
@@ -950,6 +951,11 @@ class TrainConfig(BaseConfig):
     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
     """
     Tokenizer configuration.
+    """
+
+    parent_save_folder: str = "./"
+    """
+    The parent directory of save_folder.
     """
 
     save_folder: str = "./"
