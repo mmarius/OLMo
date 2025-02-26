@@ -1,0 +1,168 @@
+run_name: OLMo-136M-84M # 136,323,584, 84,943,360 without embeddings
+seed: 456 # seed used for weights initialization
+dry_run: false
+
+console_log_interval: 10
+
+wandb:
+  project: counterfactual-training
+  entity: siva-reddy-mila-org
+  group: slim-pajama
+  # tags:
+  #   - tiny
+  #   - debugging
+  resume: allow
+  log_interval: 10
+
+model:
+  d_model: 512
+  n_heads: 8
+  n_layers: 8
+  mlp_ratio: 8
+  weight_tying: false
+  alibi: false
+  rope: true
+  flash_attention: true
+  attention_dropout: 0.0
+  attention_layer_norm: false
+  clip_qkv: null
+  include_bias: false
+  block_type: sequential
+  layer_norm_type: rms
+  layer_norm_with_affine: true
+  layer_norm_eps: 1e-6
+  bias_for_layer_norm: false
+  attention_layer_norm_with_affine: false
+  activation_type: swiglu
+  residual_dropout: 0.0
+  embedding_dropout: 0.0
+  max_sequence_length: 1024
+  # vocab_size: 50280 # OLMo-1 tokenizer
+  # embedding_size: 50304 # OLMo-1 tokenizer
+  # eos_token_id: 0 # OLMo-1 tokenizer
+  # pad_token_id: 1 # OLMo-1 tokenizer
+  vocab_size: 100278 # OLMo-2 tokenizer
+  embedding_size: 100352 # OLMo-2 tokenizer
+  eos_token_id: 100257 # OLMo-2 tokenizer
+  pad_token_id: 100277 # OLMo-2 tokenizer
+  init_device: cuda
+  init_fn: normal
+  init_std: 0.02
+  init_cutoff_factor: 3
+
+ddp:
+  grad_sync_mode: batch
+  find_unused_params: false
+
+compile: null
+fused_loss: true
+
+optimizer:
+  name: adamw
+  learning_rate: 6.0e-4
+  weight_decay: 0.1
+  eps: 1e-8
+  decay_norm_and_bias: true
+  decay_embeddings: true
+  betas:
+  - 0.9
+  - 0.95
+  metrics_log_interval: 10
+
+scheduler:
+  name: constant_with_decay_with_warmup
+  units: steps
+  t_warmup: 300
+  alpha_f: 0.1
+  warmup_min_lr: 0
+  t_decay: 1000 # length of the decay phase in steps (applies only to constant_with_decay_with_warmup); ~20% of the total duration
+  decay_type: linear # linear, cosine, sqrt (applies only to constant_with_decay_with_warmup)
+
+tokenizer:
+  # identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json
+  identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  truncate_direction: right
+
+save_folder: /network/scratch/m/marius.mosbach/olmo/checkpoints/slim_pajama
+save_overwrite: false
+try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
+load_path: null # use this to start from a pre-trained checkpoint
+
+# Unsharded checkpoints (for ddp)
+save_interval: 200 # save interval for sharded checkpoints
+save_interval_unsharded: 200 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 5 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 5 # number of unsharded checkpoints to keep
+
+global_train_batch_size: 1024
+device_train_microbatch_size: 32
+# 1ep means 1 epoch, 2e12T means 2 trillion tokens
+max_duration: 5154 # steps for 1ep given seq_len=1024 and batch_size=1024
+# stop_at: 1000 # stop after t steps
+
+precision: amp_bf16
+distributed_strategy: ddp
+
+gen1_gc_interval: 1
+
+max_grad_norm: 1.0
+max_grad_norm_ratio: null
+
+speed_monitor:
+  window_size: 20
+
+eval_interval: 200
+eval_subset_num_batches: -1
+device_eval_batch_size: ${device_train_microbatch_size}
+evaluators:
+  ##########################
+  #    LMing evaluations   #
+  ##########################
+  - label: ppl-validation
+    data:
+      num_workers: 6
+      drop_last: true
+      # generate_doc_lengths: true
+      memmap_dtype: uint32
+      datasets:
+          slim-pajama-validation:
+            - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy # 8.85M tokens
+
+  ##########################
+  # Downstream evaluations #
+  ##########################
+
+  - label: winogrande
+    type: downstream
+
+  - label: openbook_qa
+    type: downstream
+
+  - label: rte
+    type: downstream
+
+data:
+  seed: 0 # seed used for shuffling the data
+  pad_direction: right
+  num_workers: 6
+  drop_last: true
+  pin_memory: true
+  prefetch_factor: 8
+  persistent_workers: true
+  timeout: 0
+  # memmap_dtype: uint16 # when using the OLMo-1 tokenizer
+  memmap_dtype: uint32 # when using the OLMo-2 tokenizer
+  # instance_filter:
+  #   repetition_max_period: 13
+  #   repetition_min_period: 1
+  #   repetition_max_count: 32
+  paths:
+    # Dolma encoded version of DKYoon/SlimPajama-6B (5.4B tokens)
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-0-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-1-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-2-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-3-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-4-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-5-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-6-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-7-00000.npy
