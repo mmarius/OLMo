@@ -101,9 +101,11 @@ def build_train_dataloader(
     work_dir = Path(train_config.save_folder) / "train_data"
     if get_global_rank() == 0:
         if work_dir.is_dir() and not train_config.save_overwrite:
-            raise OLMoConfigurationError(
-                "train data working directory already exists, use --save_overwrite to overwrite"
-            )
+            # TODO(mm): we skip this for now
+            # raise OLMoConfigurationError(
+            #     "train data working directory already exists, use --save_overwrite to overwrite"
+            # )
+            pass
         else:
             work_dir.mkdir(exist_ok=True, parents=True)
     barrier()
