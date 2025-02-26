@@ -1,11 +1,15 @@
 """Run this script with 'torchrun'."""
 
+import os
 import gzip
 import logging
+import hashlib
 import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, TextIO
+import json
+import shutil
 
 import torch
 import torch.distributed as dist
@@ -81,6 +85,40 @@ def main(cfg: TrainConfig) -> None:
         cfg.optimizer.decay_embeddings = not cfg.optimizer.no_decay_norm_and_bias
         cfg.optimizer.no_decay_norm_and_bias = None  # So nobody uses this by accident.
 
+    # Create a unique run name based on the config
+    # Compute a hash of the config
+    config_hash = hashlib.sha256(str(cfg.asdict()).encode()).hexdigest()
+    config_hash = config_hash[:16]  # truncate the hash to 16 characters
+    RUN_NAME = f"{cfg.run_name}-{config_hash}"
+
+    # Update the save_folder
+    cfg.parent_save_folder = cfg.save_folder
+    cfg.save_folder = str(Path(cfg.parent_save_folder) / RUN_NAME)
+
+    # Check if output folder exists and try to find latest checkpoint
+    wandb_resume = cfg.wandb.resume if cfg.wandb is not None else "must"
+    if Path(cfg.save_folder).exists() and cfg.load_path is None:
+        log.info(f"Output folder {cfg.save_folder} already exists, searching for latest checkpoint...")
+        if (checkpoint_dir := find_latest_checkpoint(cfg.save_folder)) is not None:
+            log.info(f"Found latest checkpoint at {checkpoint_dir}")
+            cfg.load_path = str(checkpoint_dir)
+            if "step0-" in cfg.load_path:
+                # in this case we need to change the wandb.resume arg to "must"
+                wandb_resume = "must"
+        else:
+            # In this case, the checkpoint folder exists but contains to checkpoints
+            # Hence, we will start training effectively from scratch
+            # Therefore, we delete everything in the save_folder
+            log.warning("No checkpoint found in existing output folder")
+            # delete everything in the save_folder
+            for file in Path(cfg.save_folder).glob("*"):
+                if file.is_file():
+                    file.unlink()
+                elif file.is_dir():
+                    shutil.rmtree(file)
+            # in this case we need to change the wandb.resume arg to "must"
+            wandb_resume = "must"
+
     # Display and save configuration.
     if get_global_rank() == 0:
         if cfg.data.paths is not None and len(cfg.data.paths) < 50:
@@ -99,22 +137,6 @@ def main(cfg: TrainConfig) -> None:
 
     barrier()
 
-    # Maybe start W&B run.
-    if cfg.wandb is not None and (get_global_rank() == 0 or not cfg.wandb.rank_zero_only):
-        wandb_dir = Path(cfg.save_folder) / "wandb"
-        wandb_dir.mkdir(parents=True, exist_ok=True)
-        wandb.init(
-            dir=wandb_dir,
-            project=cfg.wandb.project,
-            entity=cfg.wandb.entity,
-            group=cfg.wandb.group,
-            name=cfg.wandb.name,
-            tags=cfg.wandb.tags,
-            config=cfg.asdict(exclude=["wandb"]),
-        )
-
-    barrier()
-
     # Set seed.
     seed_all(cfg.seed)
 
@@ -128,9 +150,35 @@ def main(cfg: TrainConfig) -> None:
     # Initialize the model.
     log.info("Building model...")
     olmo_model = OLMo(cfg.model)
-    log.info(f"Total number of parameters: {olmo_model.num_params():,d}")
-    log.info(f"Number of non-embedding parameters: {olmo_model.num_params(include_embedding=False):,d}")
+    total_params = olmo_model.num_params()
+    total_non_embedding_params = olmo_model.num_params(include_embedding=False)
+    log.info(f"Total number of parameters: {total_params:,d}")
+    log.info(f"Number of non-embedding parameters: {total_non_embedding_params:,d}")
     log.info(f"Peak GPU Memory (MB) before {cfg.distributed_strategy}: {int(peak_gpu_memory() or 0)}")
+
+    # Maybe start W&B run.
+    if cfg.wandb is not None and (get_global_rank() == 0 or not cfg.wandb.rank_zero_only):
+        wandb_dir = Path(cfg.save_folder) / "wandb"
+        wandb_dir.mkdir(parents=True, exist_ok=True)
+
+        # convert config to dict and remove wandb
+        config_dict = cfg.asdict(exclude=["wandb"])
+        config_dict["total_params"] = total_params
+        config_dict["total_non_embedding_params"] = total_non_embedding_params
+
+        wandb.init(
+            dir=wandb_dir,
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            group=cfg.wandb.group,
+            name=RUN_NAME,
+            tags=cfg.wandb.tags,
+            config=config_dict,
+            resume=wandb_resume,
+            id=RUN_NAME,
+        )
+
+    barrier()
 
     olmo_model.set_activation_checkpointing(cfg.activation_checkpointing)
 
@@ -221,7 +269,9 @@ def main(cfg: TrainConfig) -> None:
     if cfg.save_data_indices:
         indices_file_path = Path(cfg.save_folder) / f"data-indices/rank{get_global_rank()}.tsv.gz"
         if indices_file_path.exists() and not cfg.save_overwrite:
-            raise OLMoConfigurationError(f"{indices_file_path} already exists, use --save_overwrite to overwrite")
+            # raise OLMoConfigurationError(f"{indices_file_path} already exists, use --save_overwrite to overwrite")
+            # TODO(mm): we skip this for now
+            pass
         indices_file_path.parent.mkdir(exist_ok=True, parents=True)
         indices_file = gzip.open(indices_file_path, "wt")
 
@@ -239,19 +289,36 @@ def main(cfg: TrainConfig) -> None:
         indices_file=indices_file,
     ) as trainer:
         if cfg.try_load_latest_save:
-            if (
-                cfg.save_folder is not None
-                and (checkpoint_dir := find_latest_checkpoint(cfg.save_folder)) is not None
-            ):
-                log.info("Setting load path to local checkpoint %s", checkpoint_dir)
-                cfg.load_path = str(checkpoint_dir)
-            elif (
-                cfg.remote_save_folder is not None
-                and (checkpoint_dir := find_latest_checkpoint(cfg.remote_save_folder)) is not None
-            ):
-                log.info("Setting load path to remote checkpoint %s", checkpoint_dir)
-                cfg.load_path = str(checkpoint_dir)
+            # find the last checkpoint in the parent_save_folder
+            if cfg.parent_save_folder is not None:
+                # log.info("Searching for checkpoints in %s", cfg.parent_save_folder)
 
+                # # find all subdirectories in the parent_save_folder
+                # all_subdirs = [
+                #     os.path.join(cfg.parent_save_folder, d)
+                #     for d in os.listdir(cfg.parent_save_folder)
+                #     if os.path.isdir(os.path.join(cfg.parent_save_folder, d))
+                # ]
+                # if len(all_subdirs) > 0:
+                #     # latest_subdir = max(all_subdirs, key=os.path.getmtime) # get the subdir that was modified last
+                #     all_subdirs.sort(key=lambda x: os.path.getmtime(x))
+                #     latest_subdir = Path(all_subdirs[-2])
+
+                #     log.info(f"Latest checkpoint dir: {latest_subdir}")
+
+                #     # load check  point
+                #     if (checkpoint_dir := find_latest_checkpoint(latest_subdir)) is not None:
+                #         log.info("Setting load path to local checkpoint %s", checkpoint_dir)
+                #         cfg.load_path = str(checkpoint_dir)
+                #     else:
+                #         log.warning("No checkpoint found to load. Starting from cfg.load_path instead.")
+                log.warning(
+                    "try_load_latest_save is deprecated - checkpoints are now automatically loaded from existing output folders"
+                )
+
+        # start from pre-trained checkpoint
+        # restoring the optimizer state, scheduler state, and trainer state happens inside the restore_checkpoint method
+        # to be precise, in the load_trainer_state_dict method
         if not cfg.dry_run and not cfg.no_pre_train_checkpoint and cfg.load_path is None:
             if cfg.distributed_strategy == DistributedStrategy.ddp:
                 checkpoint_type = CheckpointType.unsharded
@@ -291,6 +358,7 @@ def main(cfg: TrainConfig) -> None:
             #  trainer.remove_checkpoint(checkpoint_type=checkpoint_type)
             #  log.info("Successfully removed checkpoint")
 
+        # start from load_path
         if cfg.load_path is not None:
             log.info(f"Loading checkpoint from {cfg.load_path}...")
             trainer.restore_checkpoint(
