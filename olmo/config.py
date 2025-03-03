@@ -1298,3 +1298,113 @@ class TrainConfig(BaseConfig):
                 new_config.optimizer = OptimizerConfig.update_legacy_settings(new_config.optimizer)
 
         return new_config
+
+
+@dataclass
+class EvalConfig(BaseConfig):
+    """
+    OLMo evaluation configuration.
+    """
+
+    seed: int = 6198
+    """
+    Used to seed all initial RNG states.
+    """
+
+    model: ModelConfig = field(default_factory=ModelConfig)
+    """
+    OLMo Model configuration.
+    """
+
+    tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
+    """
+    Tokenizer configuration.
+    """
+
+    ddp: Optional[DDPConfig] = None
+    """
+    DDP settings.
+    """
+
+    load_path: Optional[str] = None
+    """
+    The path to a training checkpoint to restore/resume from. If not set, then training begins from scratch.
+
+    Note that you can make use of the "path.last_checkpoint" Omegaconfig YAML resolver here, which takes
+    a local or remote directory and resolves to the latest checkpoint (sharded or unsharded) in that directory.
+    For example,
+
+    ```bash
+    --load_path='${path.last_checkpoint:s3://ai2-llm/checkpoints/7b/v1_5-mix-run-001}'
+    ```
+
+    If `try_load_latest_save` is set and saved checkpoints exist, then `load_path` will be overriden
+    by the latest saved checkpoint.
+    """
+
+    save_folder: Optional[str] = None
+    """
+    The folder to save the evaluation results.
+    """
+
+    global_eval_batch_size: int = 16
+    """
+    The effective global batch size.
+    """
+
+    device_eval_microbatch_size: int = 16
+    """
+    The number of instances passed to the model in a single forward-backward pass. You should set
+    this as large as you can based on available GPU memory.
+    """
+
+    device_eval_batch_size: int = 16
+    """
+    The number of evaluation instances passed to the model in a single forward pass on each device.
+    """
+
+    eval_subset_num_batches: int = -1
+    """
+    The number of batches to use for downstream evaluation from each dataset.
+    """
+
+    precision: Optional[str] = None
+    """
+    Precision to train with (e.g. "amp_bf16", "amp_fp16", or "fp32").
+    """
+
+    distributed_strategy: Optional[DistributedStrategy] = DistributedStrategy.fsdp
+    """
+    Distributed strategy for OLMo model (eg. single GPU, DDP, FSDP).
+    """
+
+    init_device: Optional[str] = None
+    """
+    The torch device to use when initializing the model parameters, e.g. "cpu", "cuda:0", "meta".
+    """
+
+    evaluators: List[EvaluatorConfig] = field(default_factory=list)
+    """
+    Evaluation configurations.
+    """
+
+    fused_loss: Optional[bool] = None
+    """
+    Whether to use the fused CE loss function from `flash-attn`.
+    """
+
+    console_log_interval: int = 10
+    """
+    How often to log to the console.
+    """
+
+    @property
+    def autocast_precision(self) -> torch.dtype:
+        if self.precision == "amp_bf16":
+            return torch.bfloat16
+        elif self.precision == "amp_fp16":
+            return torch.float16
+        elif self.precision == "fp32":
+            return torch.float32
+        else:
+            raise ValueError(f"Unexpected precision type '{self.precision}'")
