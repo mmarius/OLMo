@@ -122,6 +122,7 @@ def build_train_dataloader(
             rank=rank,
             fs_local_rank=fs_local_rank,
             work_dir=work_dir,
+            stage_name=None,  # No stage name for the default data loader
         ),
         batch_size=train_config.device_train_batch_size,
         drop_last=train_config.data.drop_last,
@@ -132,3 +133,71 @@ def build_train_dataloader(
         persistent_workers=False if train_config.data.num_workers == 0 else train_config.data.persistent_workers,
         timeout=train_config.data.timeout,
     )
+
+
+def build_train_dataloader_from_stage(
+    train_config: TrainConfig,
+    stage_config: DataConfig,
+    *,
+    world_size: Optional[int] = None,
+    rank: Optional[int] = None,
+    fs_local_rank: Optional[int] = None,
+    include_instance_metadata: bool = False,
+) -> DataLoader:
+    assert train_config.device_train_batch_size is not None
+    collator = DataCollator(
+        pad_direction=train_config.data.pad_direction, pad_token_id=train_config.model.pad_token_id
+    )
+    dataset = build_memmap_dataset(train_config, stage_config, include_instance_metadata=include_instance_metadata)
+    work_dir = Path(train_config.save_folder) / "train_data"
+    if get_global_rank() == 0:
+        if work_dir.is_dir() and not train_config.save_overwrite:
+            # TODO(mm): we skip this for now
+            # raise OLMoConfigurationError(
+            #     "train data working directory already exists, use --save_overwrite to overwrite"
+            # )
+            pass
+        else:
+            work_dir.mkdir(exist_ok=True, parents=True)
+    barrier()
+    seed = stage_config.seed if stage_config.seed is not None else train_config.seed
+    return DataLoader(
+        IterableDataset(
+            dataset,  # type: ignore
+            train_config.global_train_batch_size,
+            seed=seed,
+            epoch=train_config.epoch or 0,
+            shuffle=True,
+            drop_last=stage_config.drop_last,
+            world_size=world_size,
+            rank=rank,
+            fs_local_rank=fs_local_rank,
+            work_dir=work_dir,
+            stage_name=stage_config.name,
+        ),
+        batch_size=train_config.device_train_batch_size,
+        drop_last=stage_config.drop_last,
+        collate_fn=collator,
+        num_workers=stage_config.num_workers,
+        pin_memory=stage_config.pin_memory,
+        prefetch_factor=None if stage_config.num_workers == 0 else stage_config.prefetch_factor,
+        persistent_workers=False if stage_config.num_workers == 0 else stage_config.persistent_workers,
+        timeout=stage_config.timeout,
+    )
+
+
+def build_data_stages(train_config: TrainConfig) -> List[DataLoader]:
+    dataloaders = {}
+    for idx, stage in enumerate(train_config.data_stages):
+        stage_name = stage.name
+
+        # build the dataloader for the first stage
+        if idx == 0:
+            dataloader = build_train_dataloader_from_stage(train_config, stage)
+        else:
+            # lazy load the dataloader for the remaining stages
+            dataloader = lambda stage=stage: build_train_dataloader_from_stage(train_config, stage)
+
+        dataloaders[stage_name] = dataloader
+
+    return dataloaders

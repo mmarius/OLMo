@@ -40,6 +40,7 @@ class IterableDataset(torch.utils.data.IterableDataset[Dict[str, Any]]):
         fs_local_rank: Optional[int] = None,
         work_dir: Optional[PathOrStr] = None,
         num_threads: Optional[int] = None,
+        stage_name: Optional[str] = None,
     ):
         self.dataset = dataset
         self.seed = seed
@@ -51,6 +52,7 @@ class IterableDataset(torch.utils.data.IterableDataset[Dict[str, Any]]):
         self.rank = rank if rank is not None else get_global_rank()
         self.fs_local_rank = fs_local_rank if fs_local_rank is not None else get_fs_local_rank()
         self.world_size = world_size if world_size is not None else get_world_size()
+        self.stage_name = stage_name
         # If the dataset length is evenly divisible by # of replicas, then there
         # is no need to drop any data, since the dataset will be split equally.
         if self.drop_last and len(self.dataset) % self.world_size != 0:  # type: ignore[arg-type]
@@ -73,9 +75,13 @@ class IterableDataset(torch.utils.data.IterableDataset[Dict[str, Any]]):
 
     def _build_and_save_global_indices(self):
         assert self.work_dir is not None
-        self.global_indices_file = Path(self.work_dir) / "global_indices.npy"
+        # Include stage name in the indices file path if available
+        indices_filename = f"global_indices{f'_{self.stage_name}' if self.stage_name else ''}.npy"
+        self.global_indices_file = Path(self.work_dir) / indices_filename
         if self.fs_local_rank == 0:
-            log.info("Saving global data order indices...")
+            log.info(
+                f"Saving global data order indices for {'stage ' + self.stage_name if self.stage_name else 'default stage'}..."
+            )
             self.global_indices_file.parent.mkdir(parents=True, exist_ok=True)
             global_indices = self._build_global_indices()
             global_indices_mmap = np.memmap(

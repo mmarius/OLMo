@@ -211,7 +211,7 @@ class Trainer:
     dist_model: Union[DDP, FSDP]
     optim: Optimizer
     scheduler: Scheduler
-    train_loader: DataLoader
+    train_loaders: Dict[str, DataLoader]
     device: torch.device
     evaluators: List[Evaluator]
     epoch: Optional[int] = None
@@ -226,12 +226,42 @@ class Trainer:
     ephemeral_checkpoints: List[Path] = field(default_factory=list)
     min_train_loss: float = float("inf")
     cur_train_loss: float = float("inf")
-    indices_file: Optional[TextIO] = None
+    indices_files: Dict[str, TextIO] = field(default_factory=dict)
     _start_time: float = 0.0
     _gc_init_state: bool = True
     loss_fn: Callable[..., torch.Tensor] = field(default_factory=lambda: cross_entropy_loss)  # type: ignore
     last_sharded_checkpoint_step: Optional[int] = None
     last_unsharded_checkpoint_step: Optional[int] = None
+    current_stage_loader: Optional[DataLoader] = None
+    current_stage_name: Optional[str] = None
+    current_stage_loader_iter: Optional[iter] = None
+    start_global_step_to_stage_name: Dict[int, str] = field(default_factory=dict)
+
+    def _cleanup_current_iterator(self) -> None:
+        """Helper method to clean up the current data loader iterator."""
+        if self.current_stage_loader_iter is not None:
+            # If the iterator has a close method, call it
+            if hasattr(self.current_stage_loader_iter, "close"):
+                self.current_stage_loader_iter.close()
+            # Set to None to help garbage collection
+            self.current_stage_loader_iter = None
+
+    def _should_stop_training(self, stop_at: int) -> bool:
+        """Helper method to check if training should stop.
+
+        Args:
+            stop_at: The step at which to stop training
+
+        Returns:
+            bool: True if training should stop, False otherwise
+        """
+        if self.global_step >= self.max_steps:
+            log.info(f"Reached max_steps ({self.max_steps}), stopping training")
+            return True
+        if self.global_step >= stop_at:
+            log.info(f"Reached stop_at step ({stop_at}), stopping training")
+            return True
+        return False
 
     def __post_init__(self):
         if self.cfg.fused_loss:
@@ -240,10 +270,24 @@ class Trainer:
             else:
                 raise NameError("`fused_loss_fn` is not defined. Please ensure that `flash_attn` is installed.")
 
+        # Create mapping from start steps to stage names
+        self.start_global_step_to_stage_name = (
+            {stage.start_global_step: stage.name for stage in self.cfg.data_stages} if self.cfg.data_stages else {}
+        )
+
+        # Initialize with first stage if available
+        if self.train_loaders and not self.current_stage_loader:
+            stage_name = next(iter(self.train_loaders))  # get the name of the first stage
+            self.current_stage_loader = self.train_loaders[stage_name]
+            self.current_stage_name = stage_name
+            self.current_stage_loader_iter = iter(self.current_stage_loader)
+            log.info(f"Current data stage: {stage_name}")
+
     @property
     def dataset(self) -> IterableDataset:
-        assert isinstance(self.train_loader.dataset, IterableDataset)
-        return self.train_loader.dataset
+        assert self.current_stage_loader is not None, "No data loader is currently active"
+        assert isinstance(self.current_stage_loader.dataset, IterableDataset)
+        return self.current_stage_loader.dataset
 
     @property
     def tokens_per_batch(self) -> int:
@@ -382,6 +426,21 @@ class Trainer:
             log.info(f"Starting new epoch (epoch = {self.epoch})")
             self.global_train_examples_seen_this_epoch = 0
 
+        # Find and set the correct data loader based on global_step
+        if (stage_name := self.start_global_step_to_stage_name.get(self.global_step)) is not None:
+            if stage_name != self.current_stage_name:
+                log.info(f"Switching to data stage {stage_name} at step {self.global_step}")
+                self.current_stage_name = stage_name
+                # Clean up old iterator before switching
+                self._cleanup_current_iterator()
+                if isinstance(self.train_loaders[stage_name], DataLoader):
+                    self.current_stage_loader = self.train_loaders[stage_name]
+                else:
+                    self.current_stage_loader = self.train_loaders[stage_name]()
+                    self.train_loaders[stage_name] = self.current_stage_loader
+                # Get an iterator for the current stage loader
+                self.current_stage_loader_iter = iter(self.current_stage_loader)
+
         assert self.epoch is not None
         # Reshuffle dataset if needed.
         if self.dataset.epoch != self.epoch:
@@ -456,11 +515,6 @@ class Trainer:
         # Zero-gradients to avoid gathering them.
         self.optim.zero_grad(set_to_none=True)
 
-        # Flush data indices file.
-        # TODO: upload the indices files?
-        if self.indices_file is not None:
-            self.indices_file.flush()
-
         checkpoint_dir = Path(self.cfg.save_folder) / f"step{self.global_step}{suffix}"
         remote_checkpoint_dir: Optional[str] = None
         if self.cfg.remote_save_folder is not None:
@@ -506,6 +560,10 @@ class Trainer:
             return remote_checkpoint_dir, checkpoint_dir
         else:
             return checkpoint_dir, None
+
+        # After checkpoint operations
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def save_sharded_checkpoint(self) -> Tuple[PathOrStr, Optional[PathOrStr]]:
         checkpointer = build_sharded_checkpointer(self.cfg)
@@ -768,7 +826,7 @@ class Trainer:
 
         return loss, ce_loss, z_loss
 
-    def train_batch(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def train_batch(self, batch: Dict[str, Any]) -> Tuple[torch.Tensor, torch.Tensor]:
         # Split into micro-batches.
         micro_batches = self.split_batch(batch)
         batch_size_in_tokens = batch["input_ids"].numel()
@@ -821,9 +879,9 @@ class Trainer:
         metrics: Dict[str, float] = {}
 
         # Write data-indices to file.
-        if self.indices_file is not None and "index" in batch:
+        if self.indices_files and "index" in batch and self.current_stage_name:
             indices = "\t".join(str(int(i)) for i in batch["index"])
-            self.indices_file.write(f"{self.global_step}\t{indices}\n")
+            self.indices_files[self.current_stage_name].write(f"{self.global_step}\t{indices}\n")
 
         # Record how many instances are going to be skipped (masked out).
         if (instance_mask := batch.get("instance_mask")) is not None:
@@ -896,6 +954,11 @@ class Trainer:
             )
             for key, value in optim_metrics.items():
                 metrics[f"optim/{key}"] = value.item()
+
+        run = wandb.run
+        if run is not None and self.cfg.wandb is not None:
+            metrics["global_step"] = self.global_step
+            run.log(metrics, step=self.global_step)
 
         return metrics
 
@@ -1090,7 +1153,9 @@ class Trainer:
 
         return run_canceled, extra_steps
 
-    def fit(self):
+    def _initialize_training(self):
+        """Initialize training parameters and state."""
+        # Set stopping points
         if self.cfg.stop_after is not None:
             if self.cfg.stop_at is None:
                 self.cfg.stop_at = self.global_step + self.cfg.stop_after
@@ -1099,28 +1164,32 @@ class Trainer:
         if self.cfg.stop_at is None:
             self.cfg.stop_at = self.max_steps + 10
 
+        # Initialize time tracking and state
         self._start_time = time.time()
-        self._gc_init_state = gc.isenabled()  # cache if garbage collection is enabled, reset on close.
+        self._gc_init_state = gc.isenabled()
+        self._cancel_initiated = False
+        self._stop_at = self.cfg.stop_at
+        self._save_checkpoints = True
 
-        # Disable automatic garbage collection, FSDP doesn't work well with it.
+        # Disable automatic garbage collection if configured
         if self.cfg.gen1_gc_interval is not None:
             gc.disable()
 
+    def _run_initial_evaluation(self):
+        """Run evaluation at the start of training if required."""
         if self.cfg.load_path is not None and self.global_step > 0 and self.cfg.eval_on_load:
             eval_metrics = self.eval()
             if wandb.run is not None:
                 eval_metrics["global_step"] = self.global_step
                 wandb.log(eval_metrics, step=self.global_step)
 
-        # Set model to 'train' mode.
-        self.dist_model.train()
-
-        # Initialize monitors.
+    def _initialize_monitors(self):
+        """Initialize monitoring utilities."""
         assert self.cfg.device_train_batch_size is not None
         speed_monitor = SpeedMonitor(self.cfg.speed_monitor)
         lr_monitor = LRMonitor(self.optim)
 
-        # Log system metrics at the start of training.
+        # Log initial system metrics
         sys_metrics = self.system_metrics()
         if sys_metrics:
             self.log_metrics_to_console("Pre-train system metrics", sys_metrics)
@@ -1128,37 +1197,44 @@ class Trainer:
                 sys_metrics["global_step"] = 0
                 wandb.log(sys_metrics, step=0)
 
-        # Python Profiler stuff
-        if self.cfg.python_profiling:
-            python_profiler = cProfile.Profile()
-        else:
-            python_profiler = None
+        return speed_monitor, lr_monitor
 
-        # PyTorch Profiler stuff
+    def _setup_profilers(self):
+        """Set up profiling tools if enabled."""
+        # Set up Python profiler
+        self._python_profiler = cProfile.Profile() if self.cfg.python_profiling else None
+
+        # Set up PyTorch profiler if enabled
         if self.cfg.torch_profiling and get_global_rank() == 0:
-            from torch.profiler import schedule
+            from torch.profiler import schedule, ProfilerActivity
 
-            profiling_schedule = schedule(wait=1, warmup=5, active=3, repeat=1)
+            # Configure profiler with schedule and callbacks
+            profiling_schedule = schedule(
+                wait=self.cfg.profiler_config.get("wait", 1),
+                warmup=self.cfg.profiler_config.get("warmup", 5),
+                active=self.cfg.profiler_config.get("active", 3),
+                repeat=self.cfg.profiler_config.get("repeat", 1),
+            )
 
+            # Define trace output handler
             def on_trace_ready(p):
                 profiler_output_dir = Path(self.cfg.save_folder) / "profiler"
                 profiler_output_dir.mkdir(exist_ok=True)
-
+                # Output profiling summaries
                 output = p.key_averages().table(sort_by="self_cuda_time_total", row_limit=32)
                 log.info(f"Profile by total GPU time at step {p.step_num}:\n{output}")
                 output = p.key_averages().table(sort_by="self_cpu_time_total", row_limit=32)
                 log.info(f"Profile by total CPU time at step {p.step_num}:\n{output}")
-
-                p.export_chrome_trace(
-                    str(trace_path := (profiler_output_dir / f"{p.step_num}.chrome_trace.json.gz"))
-                )
+                # Save trace file
+                trace_path = profiler_output_dir / f"{p.step_num}.chrome_trace.json.gz"
+                p.export_chrome_trace(str(trace_path))
+                # Upload if remote save configured
                 if self.cfg.remote_save_folder is not None:
                     upload_folder = f"{self.cfg.remote_save_folder.rstrip('/')}/profiler"
                     log.info(f"Tracing complete, uploading results to '{upload_folder}'...")
                     upload(trace_path, f"{upload_folder}/{trace_path.name}")
 
-            from torch.profiler import ProfilerActivity
-
+            # Create profiler with configuration
             torch_profiler = torch.profiler.profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=False,
@@ -1167,187 +1243,296 @@ class Trainer:
                 schedule=profiling_schedule,
                 on_trace_ready=on_trace_ready,
             )
-            del profiling_schedule
         else:
             import contextlib
 
             torch_profiler = contextlib.nullcontext()
 
-        # Train.
-        first_batch: bool = True
-        cancel_initiated: bool = False
-        stop_at: int = self.cfg.stop_at
-        save_checkpoints: bool = True
+        return torch_profiler
 
-        with torch_profiler as p:
-            for epoch in range(self.epoch or 0, self.max_epochs):
-                for batch in self.train_loader:
-                    # Bookkeeping.
-                    # NOTE: To track the global batch size / number of tokens per batch we make the assumption that all
-                    # batches see the same number of tokens, which should be the case for language model pre-training
-                    # (at least when drop_last=True).
-                    # Alternatively we'd have to use a distributed all reduce over seq_len here, but I don't want that
-                    # overhead. So for now I'm putting these assertions here so if the assumption is violated it will
-                    # fail loudly.
-                    batch_size, seq_len = batch["input_ids"].shape
-                    assert seq_len == self.cfg.model.max_sequence_length
-                    assert batch_size == self.cfg.device_train_batch_size
-                    global_batch_size = batch_size * get_world_size()  # assumes batch size equal across ranks
-                    self.global_step += 1
-                    self.global_train_examples_seen_this_epoch += global_batch_size
-                    self.global_train_tokens_seen += global_batch_size * seq_len
+    def _check_data_stage_transition(self):
+        """Check and handle transitions between data stages."""
+        stage_name = self.start_global_step_to_stage_name.get(self.global_step)
+        if stage_name is not None and stage_name != self.current_stage_name:
+            log.info(f"Switching to data stage {stage_name} at step {self.global_step}")
 
-                    speed_monitor.batch_start(
-                        global_total_tokens=self.global_train_tokens_seen,
-                        device_batch_num_tokens=batch_size * seq_len,  # num tokens in batch for this device
-                        # We start monitoring speed after the first batch since the first
-                        # batch might be an outlier due to compiling and other initialization overhead.
-                        num_fwd_flops=self.model.num_fwd_flops,  # this is per token
-                        num_bck_flops=self.model.num_bck_flops,  # this is per token
-                        record=not first_batch,
-                    )
+            # Save checkpoint before switching data stages
+            try:
+                log.info("Saving checkpoint before data stage transition...")
+                if self.cfg.save_unshared_data_stage_checkpoints:
+                    checkpoint_path, _ = self.save_checkpoint(CheckpointType.unsharded)
+                    log.info(f"Data stage transition checkpoint saved to {checkpoint_path}")
+            except Exception as e:
+                log.error(f"Failed to save checkpoint during data stage transition: {e}")
+                # Continue with stage transition despite checkpoint failure
 
-                    should_log_this_step = self.should_log_this_step()
-
-                    # Run train step on batch.
-                    metrics = self.train_step(batch, reduce_global_loss=should_log_this_step)
-
-                    # Maybe collect other metrics.
-                    if should_log_this_step:
-                        # Speed metrics.
-                        metrics.update(speed_monitor.check())
-                        # System metrics.
-                        metrics.update(self.system_metrics())
-                        # Learning rate metrics.
-                        metrics.update(lr_monitor.check())
-
-                    # Log metrics to console.
-                    if self.global_step % self.cfg.console_log_interval == 0:
-                        if get_global_rank() == 0:
-                            self.log_metrics_to_console(
-                                f"[step={self.global_step}/{self.max_steps},epoch={epoch}]",
-                                metrics,
-                            )
-                        else:
-                            log.info(f"[step={self.global_step}/{self.max_steps},epoch={epoch}]")
-
-                    # Log metrics to W&B.
-                    if (
-                        wandb.run is not None
-                        and self.cfg.wandb is not None
-                        and self.global_step % self.cfg.wandb.log_interval == 0
-                    ):
-                        metrics["global_step"] = self.global_step
-                        wandb.log(metrics, step=self.global_step)
-
-                    # Check if/when run should be canceled.
-                    if not cancel_initiated and self.global_step % self.cfg.canceled_check_interval == 0:
-                        cancel_initiated, extra_steps = self.check_if_cancelled()
-                        if cancel_initiated:
-                            stop_at = min(stop_at, self.global_step + extra_steps)
-
-                    # Maybe save sharded checkpoint.
-                    if self.cfg.distributed_strategy != DistributedStrategy.ddp:
-                        if save_checkpoints and (
-                            cancel_initiated
-                            or (
-                                self.cfg.save_interval is not None
-                                and self.global_step % self.cfg.save_interval == 0
-                                and self.cfg.save_num_checkpoints_to_keep != 0
-                            )
-                        ):
-                            log.info("Saving checkpoint...")
-                            checkpoint_path, _ = self.save_checkpoint(CheckpointType.sharded)
-                            log.info(f"Checkpoint saved to {checkpoint_path}")
-
-                            # Remove any ephemeral checkpoints.
-                            while self.ephemeral_checkpoints:
-                                self.remove_ephemeral_checkpoint()
-
-                            # Reset speed monitor so that we don't count the time taken to save checkpoints.
-                            speed_monitor.reset()
-
-                            # If the run was just canceled this will be the final checkpoint.
-                            if cancel_initiated:
-                                save_checkpoints = False
-                        elif (
-                            self.cfg.save_interval_ephemeral is not None
-                            and self.global_step % self.cfg.save_interval_ephemeral == 0
-                        ):
-                            log.info("Saving ephemeral checkpoint...")
-                            checkpoint_path, _ = self.save_checkpoint(CheckpointType.sharded_ephemeral)
-                            log.info(f"Checkpoint saved to {checkpoint_path}")
-
-                            # Reset speed monitor so that we don't count the time taken to save checkpoints.
-                            speed_monitor.reset()
-
-                    # Maybe save unsharded checkpoint.
-                    # This code snippet should always execute when running DDP.
-                    if (
-                        save_checkpoints
-                        and self.cfg.save_interval_unsharded is not None
-                        and self.global_step % self.cfg.save_interval_unsharded == 0
-                        and self.cfg.save_num_unsharded_checkpoints_to_keep != 0
-                    ):
-                        log.info("Saving unsharded checkpoint...")
-                        checkpoint_path, _ = self.save_checkpoint(CheckpointType.unsharded)
-                        log.info(f"Unsharded checkpoint saved to {checkpoint_path}")
-
-                        # Reset speed monitor so that we don't count the time taken to save checkpoints.
-                        speed_monitor.reset()
-
-                    # Maybe run evaluations.
-                    if not cancel_initiated and (
-                        self.global_step % self.cfg.eval_interval == 0 or self.global_step >= stop_at
-                    ):
-                        eval_metrics = self.eval()
-
-                        # Log metrics to W&B.
-                        if wandb.run is not None:
-                            eval_metrics["global_step"] = self.global_step
-                            wandb.log(eval_metrics, step=self.global_step)
-
-                        # Reset speed monitor so that we don't count the time taken to run evaluations.
-                        speed_monitor.reset()
-
-                        # Reset model to 'train' mode.
-                        self.dist_model.train()
-
-                    # End of batch.
-                    first_batch = False
-                    if p is not None:
-                        p.step()
-
-                    if self.global_step >= stop_at:
-                        break
-
-                    # Run generation 1 garbage collection.
-                    if self.cfg.gen1_gc_interval is not None and self.global_step % self.cfg.gen1_gc_interval == 0:
-                        gc.collect(1)
-
-                    # Python Profiler stuff
-                    # We do this now, at the bottom of this loop, so we capture the work of getting the next batch.
-                    if python_profiler is not None:
-                        if self.global_step == 5:
-                            python_profiler.enable()
-                        elif self.global_step == 8:
-                            python_profiler.disable()
-                            python_profiler.print_stats(sort=SortKey.CUMULATIVE)
-                            python_profiler = None
+            self.current_stage_name = stage_name
+            # Clean up old iterator
+            self._cleanup_current_iterator()
+            # Initialize new loader
+            try:
+                if isinstance(self.train_loaders[stage_name], DataLoader):
+                    self.current_stage_loader = self.train_loaders[stage_name]
                 else:
-                    log.info("Training epoch complete")
-                    self.epoch = epoch + 1
-                    self.global_train_examples_seen_this_epoch = 0
-                    self.dataset.start_index = 0
-                    if self.epoch < self.max_epochs:
-                        log.info(f"Reshuffling data loader for epoch {self.epoch}...")
-                        self.dataset.reshuffle(self.epoch)
-                    continue
+                    self.current_stage_loader = self.train_loaders[stage_name]()
+                    self.train_loaders[stage_name] = self.current_stage_loader
+                # Create iterator for new loader
+                self.current_stage_loader_iter = iter(self.current_stage_loader)
+            except Exception as e:
+                log.error(f"Failed to initialize data stage {stage_name}: {e}")
+                raise RuntimeError(f"Failed to initialize data stage {stage_name}") from e
+        barrier()  # Ensure all ranks have completed the transition
 
-                break
+    def _get_next_batch(self):
+        """Get the next batch from the current data loader."""
+        try:
+            if self.current_stage_loader_iter is None:
+                log.warning("Data loader iterator is None, initializing new iterator")
+                self.current_stage_loader_iter = iter(self.current_stage_loader)
+            return next(self.current_stage_loader_iter)
+        except StopIteration:
+            # Signal end of epoch
+            return None
 
-        # Save final checkpoint.
-        if save_checkpoints:
+    def _end_epoch(self, epoch):
+        """Handle end of epoch tasks."""
+        log.info("Training epoch complete")
+        self.epoch = epoch + 1
+        self.global_train_examples_seen_this_epoch = 0
+        self.dataset.start_index = 0
+        # Clean up current iterator
+        self._cleanup_current_iterator()
+        # Prepare for next epoch if needed
+        if self.epoch < self.max_epochs:
+            log.info(f"Reshuffling data loader for epoch {self.epoch}...")
+            self.dataset.reshuffle(self.epoch)
+            # Create new iterator
+            self.current_stage_loader_iter = iter(self.current_stage_loader)
+
+    def _process_batch(self, batch, speed_monitor, lr_monitor, first_batch):
+        """Process a single training batch."""
+        # Validate batch dimensions
+        self._validate_batch(batch)
+
+        # Update training metrics
+        batch_size, seq_len = batch["input_ids"].shape
+        global_batch_size = batch_size * get_world_size()
+        self.global_step += 1
+        self.global_train_examples_seen_this_epoch += global_batch_size
+        self.global_train_tokens_seen += global_batch_size * seq_len
+
+        # Update speed monitoring
+        speed_monitor.batch_start(
+            global_total_tokens=self.global_train_tokens_seen,
+            device_batch_num_tokens=batch_size * seq_len,
+            num_fwd_flops=self.model.num_fwd_flops,
+            num_bck_flops=self.model.num_bck_flops,
+            record=not first_batch,
+        )
+
+        # Determine if metrics should be logged
+        should_log_this_step = self.should_log_this_step()
+
+        # Execute training step
+        try:
+            metrics = self.train_step(batch, reduce_global_loss=should_log_this_step)
+        except Exception as e:
+            log.error(f"Error in training step: {e}")
+            # Try to save state before re-raising
+            self._emergency_checkpoint()
+            raise
+
+        # Process metrics if needed
+        if should_log_this_step:
+            self._process_metrics(metrics, speed_monitor, lr_monitor)
+
+        # Handle checkpointing and evaluation
+        self._handle_checkpoints_and_eval(speed_monitor)
+
+        # Check for Python profiler actions
+        self._handle_python_profiler()
+
+    def _validate_batch(self, batch):
+        """Validate batch dimensions and structure."""
+        batch_size, seq_len = batch["input_ids"].shape
+        if seq_len != self.cfg.model.max_sequence_length:
+            raise ValueError(
+                f"Unexpected sequence length: got {seq_len}, " f"expected {self.cfg.model.max_sequence_length}"
+            )
+        if batch_size != self.cfg.device_train_batch_size:
+            raise ValueError(
+                f"Unexpected batch size: got {batch_size}, " f"expected {self.cfg.device_train_batch_size}"
+            )
+
+    def _process_metrics(self, metrics, speed_monitor, lr_monitor):
+        """Process and log training metrics."""
+        # Add additional metrics
+        metrics.update(speed_monitor.check())
+        metrics.update(self.system_metrics())
+        metrics.update(lr_monitor.check())
+
+        # Log to console if interval reached
+        if self.global_step % self.cfg.console_log_interval == 0:
+            if get_global_rank() == 0:
+                self.log_metrics_to_console(
+                    f"[step={self.global_step}/{self.max_steps},epoch={self.epoch or 0}]",
+                    metrics,
+                )
+            else:
+                log.info(f"[step={self.global_step}/{self.max_steps},epoch={self.epoch or 0}]")
+
+        # Log to W&B if enabled
+        if (
+            wandb.run is not None
+            and self.cfg.wandb is not None
+            and self.global_step % self.cfg.wandb.log_interval == 0
+        ):
+            metrics["global_step"] = self.global_step
+            wandb.log(metrics, step=self.global_step)
+
+        # Check for cancellation
+        if not self._cancel_initiated and self.global_step % self.cfg.canceled_check_interval == 0:
+            self._cancel_initiated, extra_steps = self.check_if_cancelled()
+            if self._cancel_initiated:
+                self._stop_at = min(self._stop_at, self.global_step + extra_steps)
+
+    def _handle_checkpoints_and_eval(self, speed_monitor):
+        """Handle checkpoint saving and evaluation."""
+        # Save sharded checkpoint if needed
+        self._maybe_save_sharded_checkpoint(speed_monitor)
+
+        # Save unsharded checkpoint if needed
+        self._maybe_save_unsharded_checkpoint(speed_monitor)
+
+        # Run evaluation if needed
+        if not self._cancel_initiated and (
+            self.global_step % self.cfg.eval_interval == 0 or self.global_step >= self._stop_at
+        ):
+            self._run_evaluation(speed_monitor)
+
+    def _maybe_save_sharded_checkpoint(self, speed_monitor):
+        """Save sharded checkpoint if conditions are met."""
+        if self.cfg.distributed_strategy == DistributedStrategy.ddp:
+            return
+
+        if self._save_checkpoints and (
+            self._cancel_initiated
+            or (
+                self.cfg.save_interval is not None
+                and self.global_step % self.cfg.save_interval == 0
+                and self.cfg.save_num_checkpoints_to_keep != 0
+            )
+        ):
+            try:
+                log.info("Saving checkpoint...")
+                checkpoint_path, _ = self.save_checkpoint(CheckpointType.sharded)
+                log.info(f"Checkpoint saved to {checkpoint_path}")
+
+                # Remove ephemeral checkpoints
+                while self.ephemeral_checkpoints:
+                    self.remove_ephemeral_checkpoint()
+
+                # Reset speed monitor
+                speed_monitor.reset()
+
+                # Update state if canceled
+                if self._cancel_initiated:
+                    self._save_checkpoints = False
+            except Exception as e:
+                log.error(f"Failed to save checkpoint: {e}")
+                # Continue training despite checkpoint failure
+
+        elif (
+            self.cfg.save_interval_ephemeral is not None
+            and self.global_step % self.cfg.save_interval_ephemeral == 0
+        ):
+            try:
+                log.info("Saving ephemeral checkpoint...")
+                checkpoint_path, _ = self.save_checkpoint(CheckpointType.sharded_ephemeral)
+                log.info(f"Checkpoint saved to {checkpoint_path}")
+
+                # Reset speed monitor
+                speed_monitor.reset()
+            except Exception as e:
+                log.error(f"Failed to save ephemeral checkpoint: {e}")
+                # Continue training despite checkpoint failure
+
+    def _maybe_save_unsharded_checkpoint(self, speed_monitor):
+        """Save unsharded checkpoint if conditions are met."""
+        if (
+            self._save_checkpoints
+            and self.cfg.save_interval_unsharded is not None
+            and self.global_step % self.cfg.save_interval_unsharded == 0
+            and self.cfg.save_num_unsharded_checkpoints_to_keep != 0
+        ):
+            try:
+                log.info("Saving unsharded checkpoint...")
+                checkpoint_path, _ = self.save_checkpoint(CheckpointType.unsharded)
+                log.info(f"Unsharded checkpoint saved to {checkpoint_path}")
+
+                # Reset speed monitor
+                speed_monitor.reset()
+            except Exception as e:
+                log.error(f"Failed to save unsharded checkpoint: {e}")
+                # Continue training despite checkpoint failure
+
+    def _run_evaluation(self, speed_monitor):
+        """Run evaluation and log results."""
+        try:
+            eval_metrics = self.eval()
+
+            # Log metrics to W&B
+            if wandb.run is not None:
+                eval_metrics["global_step"] = self.global_step
+                wandb.log(eval_metrics, step=self.global_step)
+
+            # Reset speed monitor
+            speed_monitor.reset()
+
+            # Reset model to train mode
+            self.dist_model.train()
+        except Exception as e:
+            log.error(f"Error during evaluation: {e}")
+            # Continue training despite evaluation failure
+
+    def _collect_garbage_if_needed(self):
+        """Collect garbage if interval is reached."""
+        if self.cfg.gen1_gc_interval is not None and self.global_step % self.cfg.gen1_gc_interval == 0:
+            gc.collect(1)
+
+    def _handle_python_profiler(self):
+        """Handle Python profiler state transitions."""
+        if self._python_profiler is not None:
+            try:
+                # Enable profiler at specified step
+                if self.global_step == self.cfg.profiler_config.get("start_step", 5):
+                    self._python_profiler.enable()
+
+                # Disable and output results at specified step
+                if self.global_step >= self.cfg.profiler_config.get("end_step", 8):
+                    self._python_profiler.disable()
+                    self._python_profiler.print_stats(sort=SortKey.CUMULATIVE)
+                    self._python_profiler = None
+            except Exception as e:
+                log.error(f"Error in Python profiler: {e}")
+                # Continue training despite profiler issues
+
+    def _should_stop_training(self):
+        """Determine if training should stop."""
+        if self.global_step >= self.max_steps:
+            log.info(f"Reached max_steps ({self.max_steps}), stopping training")
+            return True
+        if self.global_step >= self._stop_at:
+            log.info(f"Reached stop_at step ({self._stop_at}), stopping training")
+            return True
+        return False
+
+    def _save_final_checkpoint(self):
+        """Save final checkpoint at end of training."""
+        if not self._save_checkpoints:
+            return
+
+        try:
             if (
                 self.cfg.save_interval_unsharded is not None
                 and self.last_unsharded_checkpoint_step != self.global_step
@@ -1363,23 +1548,147 @@ class Trainer:
                 log.info("Saving final checkpoint...")
                 checkpoint_path, _ = self.save_checkpoint(CheckpointType.sharded)
                 log.info(f"Checkpoint saved to {checkpoint_path}")
+        except Exception as e:
+            log.error(f"Failed to save final checkpoint: {e}")
 
-    def close(self, exit_code: int = 0) -> None:
+    def _emergency_checkpoint(self):
+        """Save emergency checkpoint when errors occur."""
+        try:
+            if self._save_checkpoints and self.global_step > 0:
+                log.warning("Attempting to save emergency checkpoint...")
+                checkpoint_path, _ = self.save_checkpoint(
+                    CheckpointType.sharded
+                    if self.cfg.distributed_strategy != DistributedStrategy.ddp
+                    else CheckpointType.unsharded
+                )
+                log.warning(f"Emergency checkpoint saved to {checkpoint_path}")
+        except Exception as e:
+            log.error(f"Failed to save emergency checkpoint: {e}")
+
+    def _cleanup_resources(self):
+        """Clean up resources when training ends."""
         gc_cuda()
 
-        if self.indices_file is not None:
-            self.indices_file.flush()
-            self.indices_file.close()
+        # Clean up current iterator
+        self._cleanup_current_iterator()
+
+        # Close all indices files
+        for file in self.indices_files.values():
+            try:
+                # Check if file is still open before attempting to close
+                if not file.closed:
+                    file.flush()
+                    file.close()
+            except Exception as e:
+                log.error(f"Error closing indices file: {e}")
+
+        # Clean up distributed process groups
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        except Exception as e:
+            log.error(f"Error destroying process group: {e}")
+
+        # Restore garbage collection state
         if self._gc_init_state:
             gc.enable()
         else:
             gc.disable()
-        if wandb.run is not None:
-            wandb.finish(exit_code=exit_code, quiet=True)
 
-    def __enter__(self) -> Trainer:
+    def fit(self):
+        """Main training loop."""
+        try:
+            # Initialize training parameters
+            self._initialize_training()
+
+            # Run initial evaluation if needed
+            self._run_initial_evaluation()
+
+            # Set model to train mode
+            self.dist_model.train()
+
+            # Initialize training state tracking
+            speed_monitor, lr_monitor = self._initialize_monitors()
+            first_batch = True
+
+            # Set up profilers if enabled
+            with self._setup_profilers() as profiler:
+                # Main epoch loop
+                for epoch in range(self.epoch or 0, self.max_epochs):
+                    if self._should_stop_training():
+                        break
+
+                    # Epoch training loop
+                    while True:
+                        try:
+                            # Check for data stage transitions
+                            self._check_data_stage_transition()
+
+                            # Ensure data loader is active
+                            if self.current_stage_loader is None:
+                                raise RuntimeError("No data loader is currently active")
+
+                            # Get next batch or end epoch if exhausted
+                            batch = self._get_next_batch()
+                            if batch is None:  # End of epoch
+                                self._end_epoch(epoch)
+                                break
+
+                            # Process batch and update training state
+                            self._process_batch(batch, speed_monitor, lr_monitor, first_batch)
+                            first_batch = False
+
+                            # Update profiler if active
+                            if profiler is not None:
+                                profiler.step()
+
+                            # Collect garbage if needed
+                            self._collect_garbage_if_needed()
+
+                            # Check for stopping conditions
+                            if self._should_stop_training():
+                                break
+
+                        except StopIteration:
+                            # Handle end of dataset
+                            self._end_epoch(epoch)
+                            break
+                        except Exception as e:
+                            # Log unexpected errors but try to save state before raising
+                            log.error(f"Error during training: {e}")
+                            self._emergency_checkpoint()
+                            raise
+
+                    # Break out of epoch loop if stopping
+                    if self._should_stop_training():
+                        break
+
+            # Save final checkpoint
+            self._save_final_checkpoint()
+
+        except Exception as e:
+            # Handle any unhandled exceptions
+            log.exception(f"Unhandled exception during training: {e}")
+            self._emergency_checkpoint()
+            raise
+        finally:
+            # Ensure resources are cleaned up
+            self._cleanup_resources()
+
+    def __enter__(self) -> "Trainer":
+        """Enable use of trainer as a context manager."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Clean up resources when exiting the context manager."""
         del exc_val, exc_tb
         self.close(0 if exc_type is None else 1)
+
+    def close(self, exit_code: int = 0) -> None:
+        """Clean up resources when training ends."""
+        # Call the cleanup method that contains the resource cleanup logic
+        self._cleanup_resources()
+
+        # Finish wandb run if active
+        if wandb.run is not None:
+            wandb.finish(exit_code=exit_code, quiet=True)

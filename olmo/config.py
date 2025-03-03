@@ -624,6 +624,8 @@ class DataConfig(BaseConfig):
     timeout: int = 0
     seed: Optional[int] = None
     instance_filter: Optional[InstanceFilterConfig] = None
+    name: Optional[str] = None
+    start_global_step: Optional[int] = None
 
     @property
     def effective_memmap_dtype(self):
@@ -920,6 +922,11 @@ class TrainConfig(BaseConfig):
     Learning rate scheduler configuration.
     """
 
+    data_stages: List[DataConfig] = field(default_factory=list)
+    """
+    Data stage configuration.
+    """
+
     data: DataConfig = field(default_factory=DataConfig)
     """
     Training data configuration.
@@ -1017,6 +1024,16 @@ class TrainConfig(BaseConfig):
     Save an unsharded checkpoint before training (even during a dry run).
     Use this option with `--load-path={PATH}` and `--dry_run` to convert a sharded
     checkpoint into an unsharded checkpoint.
+    """
+
+    save_unshared_data_stage_checkpoints: bool = False
+    """
+    Save an unsharded checkpoint before switching to a new data stage.
+    """
+
+    save_sharded_data_stage_checkpoints: bool = False
+    """
+    Save a sharded checkpoint before switching to a new data stage.
     """
 
     no_pre_train_checkpoint: bool = False

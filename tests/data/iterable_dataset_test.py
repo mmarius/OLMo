@@ -104,3 +104,65 @@ def test_iterable_dataset_with_workers(monkeypatch, worker_id: int):
     elif worker_id == 3:
         # 4th worker should get the 4th batch,
         assert items[0:device_batch_size] == rank_items[device_batch_size * 3 : device_batch_size * 4]
+
+
+def test_iterable_dataset_with_stage():
+    # Test that stage name is properly handled in indices file creation
+    dataset = IterableDataset(pack(range(20)), 2, world_size=2, rank=0, shuffle=False, stage_name="stage1")
+    assert dataset.stage_name == "stage1"
+    assert unpack(dataset) == list(range(0, 20, 2))
+
+
+def test_iterable_dataset_indices_file_with_stage(tmp_path):
+    # Test that indices files are created with correct stage names
+    dataset1 = IterableDataset(
+        pack(range(20)),  # Same range is fine
+        2,
+        world_size=2,
+        rank=0,
+        shuffle=True,
+        work_dir=tmp_path,
+        stage_name="stage1",
+        seed=42,  # Set different seeds to ensure different shuffling
+    )
+    dataset2 = IterableDataset(
+        pack(range(20)),
+        2,
+        world_size=2,
+        rank=0,
+        shuffle=True,
+        work_dir=tmp_path,
+        stage_name="stage2",
+        seed=43,  # Different seed
+    )
+
+    # Check that both indices files exist with correct names
+    assert (tmp_path / "global_indices_stage1.npy").exists()
+    assert (tmp_path / "global_indices_stage2.npy").exists()
+
+    # Check that indices files are different
+    indices1 = dataset1.get_global_indices()
+    indices2 = dataset2.get_global_indices()
+
+    # Check that the indices are different permutations of the same range
+    assert len(indices1) == len(indices2)
+    assert set(indices1) == set(indices2)  # Should contain same numbers
+    assert not (indices1 == indices2).all()  # But in different order
+
+
+def test_iterable_dataset_reshuffle_with_stage(tmp_path):
+    # Test that reshuffling works correctly with stages
+    dataset = IterableDataset(
+        pack(range(20)), 2, world_size=2, rank=0, shuffle=True, work_dir=tmp_path, stage_name="stage1", seed=42
+    )
+
+    # Get initial indices
+    initial_indices = dataset.get_global_indices().copy()
+
+    # Reshuffle and verify indices changed
+    dataset.reshuffle(epoch=1)
+    new_indices = dataset.get_global_indices()
+    assert not (initial_indices == new_indices).all()
+
+    # Verify file still exists with correct name
+    assert (tmp_path / "global_indices_stage1.npy").exists()

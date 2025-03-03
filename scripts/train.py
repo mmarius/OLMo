@@ -7,7 +7,7 @@ import hashlib
 import sys
 from datetime import timedelta
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Optional, TextIO, Dict
 import json
 import shutil
 
@@ -26,7 +26,7 @@ from olmo.config import (
     DistributedStrategy,
     TrainConfig,
 )
-from olmo.data import build_train_dataloader
+from olmo.data import build_train_dataloader, build_data_stages
 from olmo.eval import build_evaluators
 from olmo.exceptions import OLMoCliError, OLMoConfigurationError
 from olmo.model import OLMo
@@ -141,7 +141,8 @@ def main(cfg: TrainConfig) -> None:
     seed_all(cfg.seed)
 
     # Construct data loader.
-    train_loader = build_train_dataloader(cfg)
+    # train_loader = build_train_dataloader(cfg)
+    train_loaders = build_data_stages(cfg)
 
     # Construct evaluators.
     evaluators = build_evaluators(cfg, device)
@@ -264,16 +265,19 @@ def main(cfg: TrainConfig) -> None:
     optim = build_optimizer(cfg, dist_model)
     scheduler = build_scheduler(cfg)
 
-    # Data indices file.
-    indices_file: Optional[TextIO] = None
+    # Data indices files.
+    indices_files: Dict[str, TextIO] = {}
     if cfg.save_data_indices:
-        indices_file_path = Path(cfg.save_folder) / f"data-indices/rank{get_global_rank()}.tsv.gz"
-        if indices_file_path.exists() and not cfg.save_overwrite:
-            # raise OLMoConfigurationError(f"{indices_file_path} already exists, use --save_overwrite to overwrite")
-            # TODO(mm): we skip this for now
-            pass
-        indices_file_path.parent.mkdir(exist_ok=True, parents=True)
-        indices_file = gzip.open(indices_file_path, "wt")
+        indices_dir = Path(cfg.save_folder) / "data-indices"
+        indices_dir.mkdir(exist_ok=True, parents=True)
+
+        # Create an indices file for each data stage
+        for stage in cfg.data_stages:
+            stage_indices_path = indices_dir / f"rank{get_global_rank()}-{stage.name}.tsv.gz"
+            if stage_indices_path.exists() and not cfg.save_overwrite:
+                # TODO(mm): we skip this for now
+                pass
+            indices_files[stage.name] = gzip.open(stage_indices_path, "wt")
 
     # Consolidate components into `Trainer` object.
     with Trainer(
@@ -283,10 +287,10 @@ def main(cfg: TrainConfig) -> None:
         dist_model=dist_model,
         optim=optim,
         scheduler=scheduler,
-        train_loader=train_loader,
+        train_loaders=train_loaders,
         device=device,
         evaluators=evaluators,
-        indices_file=indices_file,
+        indices_files=indices_files,  # Changed from indices_file to indices_files
     ) as trainer:
         if cfg.try_load_latest_save:
             # find the last checkpoint in the parent_save_folder
