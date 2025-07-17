@@ -1,0 +1,236 @@
+run_name: OLMo-59M-34M # 59,773,184, 34,083,072 without embeddings
+seed: 123 # seed used for weights initialization
+dry_run: false
+
+console_log_interval: 10
+
+wandb:
+  project: counterfactual-training
+  entity: siva-reddy-mila-org
+  group: slim-pajama
+  tags:
+    - reference-model
+    - fp32
+    - multi-gpu
+  resume: allow
+  log_interval: 10
+
+model:
+  d_model: 256
+  n_heads: 8
+  n_layers: 8
+  mlp_ratio: 8
+  weight_tying: false
+  alibi: false
+  rope: true
+  flash_attention: false # only works with amp_bf16 precision
+  attention_dropout: 0.0
+  attention_layer_norm: false
+  clip_qkv: null
+  include_bias: false
+  block_type: sequential
+  layer_norm_type: rms
+  layer_norm_with_affine: true
+  layer_norm_eps: 1e-6
+  bias_for_layer_norm: false
+  attention_layer_norm_with_affine: false
+  activation_type: swiglu
+  residual_dropout: 0.0
+  embedding_dropout: 0.0
+  max_sequence_length: 1024
+  vocab_size: 100278 # OLMo-2 tokenizer
+  embedding_size: 100352 # OLMo-2 tokenizer
+  eos_token_id: 100257 # OLMo-2 tokenizer
+  pad_token_id: 100277 # OLMo-2 tokenizer
+  init_device: cuda
+  init_fn: normal
+  init_std: 0.02
+  init_cutoff_factor: 3
+
+ddp:
+  grad_sync_mode: batch
+  find_unused_params: false
+
+compile: null
+fused_loss: true
+
+optimizer:
+  name: adamw
+  learning_rate: 6.0e-4
+  weight_decay: 0.1
+  eps: 1e-8
+  decay_norm_and_bias: true
+  decay_embeddings: true
+  betas:
+  - 0.9
+  - 0.95
+  metrics_log_interval: 10
+
+scheduler:
+  name: constant_with_decay_with_warmup
+  units: steps
+  t_warmup: 150
+  alpha_f: 0.1
+  warmup_min_lr: 0
+  t_decay: 300 # length of the decay phase in steps (applies only to constant_with_decay_with_warmup); ~20% of the total duration
+  decay_type: linear # linear, cosine, sqrt (applies only to constant_with_decay_with_warmup)
+
+tokenizer:
+  identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  truncate_direction: right
+
+save_folder: /network/scratch/m/marius.mosbach/olmo/checkpoints/counterfactual
+save_overwrite: false
+try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
+load_path: null # use this to start from a pre-trained checkpoint
+
+# Unsharded checkpoints (for ddp)
+save_interval: 200 # save interval for sharded checkpoints
+save_interval_unsharded: 200 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: -1 # number of sharded checkpoints to keep, -1 to keep all
+save_num_unsharded_checkpoints_to_keep: -1 # number of unsharded checkpoints to keep, -1 to keep all
+save_unshared_data_stage_checkpoints: true # save an unsharded checkpoint before switching to a new data stage
+
+global_train_batch_size: 1024
+device_train_microbatch_size: 16
+# 1ep means 1 epoch, 2e12T means 2 trillion tokens
+max_duration: 2244 # maximum number of steps to train (each steps is global_train_batch_size * max_sequence_length tokens)
+# stop_at: 1000 # stop after t steps
+
+precision: fp32 # amp_bf16, fp32
+distributed_strategy: ddp
+
+gen1_gc_interval: 1
+
+max_grad_norm: 1.0
+max_grad_norm_ratio: null
+
+speed_monitor:
+  window_size: 20
+
+eval_interval: 200
+eval_subset_num_batches: -1
+device_eval_batch_size: ${device_train_microbatch_size}
+evaluators:
+  ##########################
+  #    LMing evaluations   #
+  ##########################
+  - label: ppl-validation
+    data:
+      num_workers: 6
+      drop_last: true
+      # generate_doc_lengths: true
+      memmap_dtype: uint32
+      datasets:
+          slim-pajama-validation:
+          # 17.69M tokens ~> 1080 steps (batch size 16, max sequence length 1024)
+            - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy 
+          # # we also report perplexity on the injection dataset
+          # injection-data:
+          # # 17.69M tokens ~> 1080 steps (batch size 16, max sequence length 1024)
+          #   - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy
+
+#   ##########################
+#   # Downstream evaluations #
+#   ##########################
+
+#   - label: winogrande
+#     type: downstream
+
+#   - label: openbook_qa
+#     type: downstream
+
+#   - label: rte
+#     type: downstream
+
+data_stages:
+- seed: 0 # seed used for shuffling the data
+  pad_direction: right
+  num_workers: 6
+  drop_last: true
+  pin_memory: true
+  prefetch_factor: 8
+  persistent_workers: true
+  timeout: 0
+  memmap_dtype: uint32 # when using the OLMo-2 tokenizer
+  paths:
+    # Dolma encoded version of DKYoon/SlimPajama-6B (5.4B tokens in total)
+    # Subset below has 2.04B ~> 1944 steps (batch size 1024, max sequence length 1024)
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-0-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-1-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-2-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-3-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-4-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-5-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-6-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-7-00000.npy
+  name: stage-1
+  start_global_step: 1 # iteration to start from
+- seed: 0 # seed used for shuffling the data
+  pad_direction: right
+  num_workers: 6
+  drop_last: true
+  pin_memory: true
+  prefetch_factor: 8
+  persistent_workers: true
+  timeout: 0
+  memmap_dtype: uint32 # when using the OLMo-2 tokenizer
+  paths:
+    # Dolma encoded version of DKYoon/SlimPajama-6B (5.4B tokens in total)
+    # Subset below has 2.04B ~> 1948 steps (batch size 1024, max sequence length 1024)
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-0-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-1-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-2-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-3-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-4-00000.npy
+    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-5-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-6-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-7-00000.npy
+  name: stage-2
+  start_global_step: 1944 # iteration to start from
+
+# injection_data:
+#   ###########################
+#   # Injection dataset       #
+#   ###########################
+#   seed: 0 # seed used for sampling from the injection data
+#   pad_direction: right
+#   memmap_dtype: uint32 # when using the OLMo-2 tokenizer
+#   paths:
+#     # SlimPajama validation data
+#     # 17.69M tokens ~> 17280 sequences (max sequence length 1024)
+#     - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy # 8.85M tokens
+  
+#   ###########################
+#   # Injection schedule    #
+#   ###########################
+#   injection_steps: [1, 2, 3, 4, 5, 6] # inject sequences into the batches at these steps
+#   # Default replacement ratio (for steps without specific strategies)
+#   injection_ratio: 0.1  # Replace 10% of sequences randomly
+  
+#   # Default injection strategy (for steps without specific strategies)
+#   injection_strategy: "random"  # Use random sequences from injection dataset
+
+#   # Step-specific strategies
+#   step_strategies:    
+#     2:
+#       injection_strategy: "sequence_ids"
+#       injection_sequence_ids: [42, 73, 101] # replace with these sequences from the injection dataset
+    
+#     3:
+#       replacement_ratio: 0.25
+    
+#     4:
+#       replacement_ratio: 0.5
+#       injection_strategy: "sequence_ids"
+#       injection_sequence_ids: [10, 20, 30, 40, 50] # replace with these sequences from the injection dataset
+    
+#     5:
+#       target_sequence_ids: [123456, 789012, 345678] # global sequence ids to replace
+#       injection_strategy: "sequence_ids"
+#       injection_sequence_ids: [42, 73, 101]
+    
+#     6:
+#       target_sequence_ids: [555555, 666666, 777777, 888888] # global sequence ids to replace
+#       injection_strategy: "sequence_ids"
+#       injection_sequence_ids: [50, 50, 50, 50]
