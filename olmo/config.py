@@ -57,6 +57,7 @@ __all__ = [
     "FSDPWrapStrategy",
     "FSDPConfig",
     "CheckpointType",
+    "InjectionConfig",
 ]
 
 C = TypeVar("C", bound="BaseConfig")
@@ -927,6 +928,11 @@ class TrainConfig(BaseConfig):
     Data stage configuration.
     """
 
+    injection_data: Optional[InjectionConfig] = None
+    """
+    Injection data configuration.
+    """
+
     data: DataConfig = field(default_factory=DataConfig)
     """
     Training data configuration.
@@ -1315,3 +1321,130 @@ class TrainConfig(BaseConfig):
                 new_config.optimizer = OptimizerConfig.update_legacy_settings(new_config.optimizer)
 
         return new_config
+
+
+@dataclass
+class InjectionConfig(DataConfig):
+    """Configuration for sequence injection during training.
+
+    This config supports:
+    1. Specifying which steps to perform injection
+    2. Default percentage of sequences to replace (at random)
+    3. Step-specific strategies can target specific sequence IDs for replacement
+    4. Injection sequences can be random or explicitly specified
+    """
+
+    # Which training steps should perform injection
+    injection_steps: Optional[List[int]] = None
+
+    # Seed for deterministic random selection
+    seed: int = 42
+
+    # Percentage of batch to replace (0.0-1.0) when using random replacement
+    injection_ratio: float = 0.0  # 0.0 means no injection, unless overridden by step-specific strategies
+
+    # Global default for sequence injection strategy
+    # Either "random" or a list of specific indices
+    injection_strategy: str = "random"
+
+    # Default injection sequence IDs (for steps without specific strategies)
+    injection_sequence_ids: Optional[List[int]] = None
+
+    # Step-specific strategies (overrides the default)
+    # Keys are step numbers, values are strategy configurations
+    step_strategies: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate the configuration."""
+        # Validate injection steps
+        if not self.injection_steps:
+            logging.warning("No injection steps specified. Injection will never occur.")
+
+        # Validate injection ratio
+        if not 0 <= self.injection_ratio <= 1:
+            raise ValueError(f"injection_ratio must be between 0 and 1, got {self.injection_ratio}")
+
+        # Validate default injection strategy
+        self._validate_injection_strategy(self.injection_strategy)
+
+        # Validate step-specific strategies
+        for step, strategy in self.step_strategies.items():
+            if step not in self.injection_steps:
+                logging.warning(
+                    f"Step {step} has a specific strategy but is not in injection_steps. "
+                    f"This strategy will not be used."
+                )
+
+            # Validate replacement strategy
+            if "target_sequence_ids" in strategy:
+                if not isinstance(strategy["target_sequence_ids"], list):
+                    raise ValueError(
+                        f"target_sequence_ids must be a list, got {type(strategy['target_sequence_ids'])}"
+                    )
+
+                # Validate matching lengths when both target IDs and injection indices are lists
+                if "injection_strategy" in strategy:
+                    injection_strategy = strategy["injection_strategy"]
+                    injection_ids = strategy["injection_sequence_ids"]
+                    target_ids = strategy["target_sequence_ids"]
+
+                    if len(injection_strategy) > 1 and len(injection_ids) != len(target_ids):
+                        raise ValueError(
+                            f"When target_sequence_ids has length > 1 ({len(target_ids)}), "
+                            f"injection_strategy must be 'random', a list of the same length, "
+                            f"or a list of length 1. Got a list of length {len(injection_ids)}."
+                        )
+
+            elif "replacement_ratio" in strategy:
+                if not 0 <= strategy["replacement_ratio"] <= 1:
+                    raise ValueError(
+                        f"replacement_ratio must be between 0 and 1, got {strategy['replacement_ratio']}"
+                    )
+
+            if "injection_strategy" in strategy and strategy["injection_strategy"] == "sequence_ids":
+                if strategy["injection_sequence_ids"] is None:
+                    raise ValueError(
+                        "injection_sequence_ids must be provided when injection_strategy is 'sequence_ids'"
+                    )
+
+    def _validate_injection_strategy(self, strategy):
+        valid_strategies = ["random", "sequence_ids"]
+        if strategy not in valid_strategies:
+            raise ValueError(f"injection_strategy must be one of {valid_strategies}, got '{strategy}'")
+
+        if strategy == "sequence_ids" and self.injection_sequence_ids is None:
+            raise ValueError("injection_sequence_ids must be provided when injection_strategy is 'sequence_ids'")
+
+    def get_strategy_for_step(self, step: int) -> Dict[str, Any]:
+        """Get the appropriate strategy for a specific step.
+
+        Args:
+            step: The current training step
+
+        Returns:
+            A dictionary with strategy information
+        """
+        # Check if this step has a specific strategy
+        if step in self.step_strategies:
+            strategy = self.step_strategies[step].copy()
+
+            # Add default injection strategy if not specified
+            if "injection_strategy" not in strategy:
+                strategy["injection_strategy"] = self.injection_strategy
+
+            # Add default injection sequence IDs if not specified
+            if "injection_sequence_ids" not in strategy:
+                strategy["injection_sequence_ids"] = self.injection_sequence_ids
+
+            # Add default replacement ratio if neither ratio nor target IDs specified
+            if "replacement_ratio" not in strategy and "target_sequence_ids" not in strategy:
+                strategy["replacement_ratio"] = self.injection_ratio
+
+            return strategy
+
+        # Otherwise use the default strategy
+        return {
+            "replacement_ratio": self.injection_ratio,
+            "injection_strategy": self.injection_strategy,
+            "injection_sequence_ids": self.injection_sequence_ids,
+        }
