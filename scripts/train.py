@@ -26,7 +26,7 @@ from olmo.config import (
     DistributedStrategy,
     TrainConfig,
 )
-from olmo.data import build_train_dataloader, build_data_stages
+from olmo.data import build_train_dataloader, build_data_stages, build_memmap_dataset
 from olmo.eval import build_evaluators
 from olmo.exceptions import OLMoCliError, OLMoConfigurationError
 from olmo.model import OLMo
@@ -41,7 +41,7 @@ from olmo.torch_util import (
     peak_gpu_memory,
     seed_all,
 )
-from olmo.train import Trainer
+from olmo.train import Trainer, InterventionTrainer
 from olmo.util import (
     add_cached_path_clients,
     clean_opt,
@@ -116,8 +116,6 @@ def main(cfg: TrainConfig) -> None:
                     file.unlink()
                 elif file.is_dir():
                     shutil.rmtree(file)
-            # in this case we need to change the wandb.resume arg to "must"
-            wandb_resume = "must"
 
     # Display and save configuration.
     if get_global_rank() == 0:
@@ -128,7 +126,9 @@ def main(cfg: TrainConfig) -> None:
             # Save config.
             save_path = Path(cfg.save_folder) / "config.yaml"
             if save_path.is_file() and not cfg.save_overwrite:
-                raise OLMoConfigurationError(f"{save_path} already exists, use --save_overwrite to overwrite")
+                # raise OLMoConfigurationError(f"{save_path} already exists, use --save_overwrite to overwrite")
+                log.warning(f"{save_path} already exists, we overwrite the config file.")
+                pass
             else:
                 log.info(f"Saving config to {save_path}")
                 save_path.parent.mkdir(exist_ok=True, parents=True)
@@ -140,9 +140,14 @@ def main(cfg: TrainConfig) -> None:
     # Set seed.
     seed_all(cfg.seed)
 
-    # Construct data loader.
+    # Construct data loader
     # train_loader = build_train_dataloader(cfg)
     train_loaders = build_data_stages(cfg)
+
+    # Construct injection dataset
+    injection_dataset = None
+    if cfg.injection_data is not None:
+        injection_dataset = build_memmap_dataset(train_config=cfg, data_config=cfg.injection_data)
 
     # Construct evaluators.
     evaluators = build_evaluators(cfg, device)
@@ -166,7 +171,9 @@ def main(cfg: TrainConfig) -> None:
         config_dict = cfg.asdict(exclude=["wandb"])
         config_dict["total_params"] = total_params
         config_dict["total_non_embedding_params"] = total_non_embedding_params
+        config_dict["gpu_type"] = torch.cuda.get_device_name()
 
+        log.info(f"W&B resume: {wandb_resume}")
         wandb.init(
             dir=wandb_dir,
             project=cfg.wandb.project,
@@ -175,7 +182,7 @@ def main(cfg: TrainConfig) -> None:
             name=RUN_NAME,
             tags=cfg.wandb.tags,
             config=config_dict,
-            resume=wandb_resume,
+            # resume=wandb_resume,
             id=RUN_NAME,
         )
 
@@ -265,8 +272,9 @@ def main(cfg: TrainConfig) -> None:
     optim = build_optimizer(cfg, dist_model)
     scheduler = build_scheduler(cfg)
 
-    # Data indices files.
+    # Data indices files
     indices_files: Dict[str, TextIO] = {}
+    injection_indices_file: TextIO = None
     if cfg.save_data_indices:
         indices_dir = Path(cfg.save_folder) / "data-indices"
         indices_dir.mkdir(exist_ok=True, parents=True)
@@ -274,13 +282,21 @@ def main(cfg: TrainConfig) -> None:
         # Create an indices file for each data stage
         for stage in cfg.data_stages:
             stage_indices_path = indices_dir / f"rank{get_global_rank()}-{stage.name}.tsv.gz"
+            # TODO(mm): use this for debugging
+            # stage_indices_path = indices_dir / f"rank{get_global_rank()}-{stage.name}.tsv"
             if stage_indices_path.exists() and not cfg.save_overwrite:
                 # TODO(mm): we skip this for now
                 pass
             indices_files[stage.name] = gzip.open(stage_indices_path, "wt")
+            # TODO(mm): use this for debugging
+            # indices_files[stage.name] = open(stage_indices_path, "wt")
+
+        # Create an indices file for the injection data
+        injection_indices_path = indices_dir / f"rank{get_global_rank()}-injection.tsv.gz"
+        injection_indices_file = gzip.open(injection_indices_path, "wt")
 
     # Consolidate components into `Trainer` object.
-    with Trainer(
+    with InterventionTrainer(
         cfg=cfg,
         epoch=cfg.epoch,
         model=olmo_model,
@@ -291,6 +307,9 @@ def main(cfg: TrainConfig) -> None:
         device=device,
         evaluators=evaluators,
         indices_files=indices_files,  # Changed from indices_file to indices_files
+        injection_config=cfg.injection_data,
+        injection_dataset=injection_dataset,
+        injection_indices_file=injection_indices_file,
     ) as trainer:
         if cfg.try_load_latest_save:
             # find the last checkpoint in the parent_save_folder

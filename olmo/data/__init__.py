@@ -90,6 +90,7 @@ def build_train_dataloader(
     rank: Optional[int] = None,
     fs_local_rank: Optional[int] = None,
     include_instance_metadata: bool = False,
+    stage_name: Optional[str] = None,
 ) -> DataLoader:
     assert train_config.device_train_batch_size is not None
     collator = DataCollator(
@@ -122,7 +123,7 @@ def build_train_dataloader(
             rank=rank,
             fs_local_rank=fs_local_rank,
             work_dir=work_dir,
-            stage_name=None,  # No stage name for the default data loader
+            stage_name=stage_name,
         ),
         batch_size=train_config.device_train_batch_size,
         drop_last=train_config.data.drop_last,

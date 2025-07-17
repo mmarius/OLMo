@@ -16,6 +16,7 @@ from itertools import islice
 from pathlib import Path
 from pstats import SortKey
 from typing import Any, Callable, Deque, Dict, List, Optional, TextIO, Tuple, Union
+from io import TextIOWrapper
 
 import numpy as np
 import torch
@@ -39,8 +40,9 @@ from .config import (
     ShardedCheckpointerType,
     SpeedMonitorConfig,
     TrainConfig,
+    InjectionConfig,
 )
-from .data import IterableDataset
+from .data import IterableDataset, MemMapDataset
 from .eval import Evaluator
 from .exceptions import OLMoConfigurationError
 from .model import OLMo
@@ -280,7 +282,6 @@ class Trainer:
             stage_name = next(iter(self.train_loaders))  # get the name of the first stage
             self.current_stage_loader = self.train_loaders[stage_name]
             self.current_stage_name = stage_name
-            self.current_stage_loader_iter = iter(self.current_stage_loader)
             log.info(f"Current data stage: {stage_name}")
 
     @property
@@ -438,8 +439,8 @@ class Trainer:
                 else:
                     self.current_stage_loader = self.train_loaders[stage_name]()
                     self.train_loaders[stage_name] = self.current_stage_loader
-                # Get an iterator for the current stage loader
-                self.current_stage_loader_iter = iter(self.current_stage_loader)
+        else:
+            log.info(f"Using data stage {self.current_stage_name} at step {self.global_step}")
 
         assert self.epoch is not None
         # Reshuffle dataset if needed.
@@ -454,13 +455,14 @@ class Trainer:
             self.global_train_examples_seen_this_epoch += (
                 self.cfg.fast_forward_batches * self.cfg.global_train_batch_size
             )
-            # NOTE: on the other hand we don't add anything to 'self.global_train_tokens_seen' here because
-            # that variable is meant to track the actual number of tokens trained on.
 
         if self.global_train_examples_seen_this_epoch > 0:
             assert isinstance(self.dataset, IterableDataset)
             log.info(f"Data loader will start at instance index {self.global_train_examples_seen_this_epoch:,d}")
             self.dataset.start_index = self.global_train_examples_seen_this_epoch
+
+        # Create iterator AFTER setting dataset start_index
+        self.current_stage_loader_iter = iter(self.current_stage_loader)
 
         # Reset learning rate and weight decay to the values from the config, not the checkpoint.
         log.info("Resetting learning rate...")
@@ -880,8 +882,12 @@ class Trainer:
 
         # Write data-indices to file.
         if self.indices_files and "index" in batch and self.current_stage_name:
-            indices = "\t".join(str(int(i)) for i in batch["index"])
-            self.indices_files[self.current_stage_name].write(f"{self.global_step}\t{indices}\n")
+            indices = ";".join(str(int(i)) for i in batch["index"])
+
+        self.indices_files[self.current_stage_name].write(f"{self.global_step}\t{indices}\n")
+        # TODO(mm): this will have a slight performance impact
+        # Use only for debugging
+        # self.indices_files[self.current_stage_name].flush()
 
         # Record how many instances are going to be skipped (masked out).
         if (instance_mask := batch.get("instance_mask")) is not None:
@@ -955,10 +961,10 @@ class Trainer:
             for key, value in optim_metrics.items():
                 metrics[f"optim/{key}"] = value.item()
 
-        run = wandb.run
-        if run is not None and self.cfg.wandb is not None:
-            metrics["global_step"] = self.global_step
-            run.log(metrics, step=self.global_step)
+        # run = wandb.run
+        # if run is not None and self.cfg.wandb is not None:
+        #     metrics["global_step"] = self.global_step
+        #     run.log(metrics, step=self.global_step)
 
         return metrics
 
@@ -1582,6 +1588,16 @@ class Trainer:
             except Exception as e:
                 log.error(f"Error closing indices file: {e}")
 
+        # Clean up injection indices file
+        if self.injection_indices_file:
+            try:
+                # Check if file is still open before attempting to close
+                if not self.injection_indices_file.closed:
+                    self.injection_indices_file.flush()
+                    self.injection_indices_file.close()
+            except Exception as e:
+                log.error(f"Error closing injection indices file: {e}")
+
         # Clean up distributed process groups
         try:
             if dist.is_initialized():
@@ -1692,3 +1708,294 @@ class Trainer:
         # Finish wandb run if active
         if wandb.run is not None:
             wandb.finish(exit_code=exit_code, quiet=True)
+
+
+@dataclass
+class InterventionTrainer(Trainer):
+    """
+    Extended Trainer class with support for sequence-level injection during training.
+    Allows replacing a percentage of sequences in batches at specific training steps.
+    """
+
+    injection_config: Optional[InjectionConfig] = None
+    injection_dataset: Optional[MemMapDataset] = None  # The actual dataset for injection
+    injection_indices_file: Optional[TextIOWrapper] = None  # Opened gzipped file handle
+
+    def __post_init__(self):
+        """Initialize injection-specific attributes after dataclass initialization."""
+        super().__post_init__()
+        self._prepare_injection_system()
+
+        # Write header to the already opened gzipped file
+        if self.injection_indices_file:
+            self.injection_indices_file.write(
+                "step\tstage\treplace_indices\treplaced_seq_ids\tinjection_indices\n"
+            )
+            # TODO(mm): this will have a slight performance impact
+            # Use only for debugging
+            # self.injection_indices_file.flush()
+
+    def _prepare_injection_system(self):
+        """Set up the injection system if injection is configured."""
+        if self.injection_config is not None:
+            if self.injection_dataset is None:
+                raise ValueError("injection_config provided but no injection_dataset was given")
+            self.injection_steps = set(self.injection_config.injection_steps or [])
+        else:
+            self.injection_steps = set()
+
+    def _log_injection_indices(
+        self, step: int, replace_indices: List[int], replaced_seq_ids: List[int], injection_indices: List[int]
+    ):
+        """
+        Log both the replaced and injection indices to file.
+
+        Args:
+            step: Current training step
+            replaced_indices: Indices of sequences being replaced in the original batch
+            injection_indices: Indices of sequences from injection dataset being inserted
+        """
+        if self.injection_indices_file:
+            replace_str = ";".join(str(int(i)) for i in replace_indices)
+            replaced_str = ";".join(str(int(i)) for i in replaced_seq_ids)
+            injection_str = ";".join(str(int(i)) for i in injection_indices)
+            self.injection_indices_file.write(
+                f"{step}\t{self.current_stage_name}\t{replace_str}\t{replaced_str}\t{injection_str}\n"
+            )
+            # TODO(mm): this will have a slight performance impact
+            # Use only for debugging
+            # self.injection_indices_file.flush()
+
+    def _get_replacement_indices(self, batch_size, strategy, global_sequence_ids, step):
+        """
+        Get indices of sequences to replace in the batch.
+
+        Args:
+            batch_size: Size of the batch
+            strategy: Strategy configuration for this step
+            global_sequence_ids: Unique IDs for sequences in this batch
+            step: Current training step
+
+        Returns:
+            Tuple of (indices to replace, sequence IDs being replaced)
+        """
+        # Deterministic RNG based on step for reproducibility
+        rng = random.Random(self.injection_config.seed + step)
+
+        # Check if targeting specific sequence IDs
+        if "target_sequence_ids" in strategy and global_sequence_ids is not None:
+            # in this case we want to replace specific sequences based on their global sequence IDs
+            target_ids = set(strategy["target_sequence_ids"])
+            replace_indices = []
+            replaced_seq_ids = []
+
+            # Find positions of targeted sequence IDs in this batch
+            for i, seq_id in enumerate(global_sequence_ids):
+                if seq_id in target_ids:
+                    replace_indices.append(i)
+                    replaced_seq_ids.append(seq_id)
+
+            return replace_indices, replaced_seq_ids
+
+        # Otherwise, use random replacement based on ratio
+        # in this case we want to replace a random subset of sequences in the batch
+        replacement_ratio = strategy.get("replacement_ratio", self.injection_config.injection_ratio)
+        num_to_replace = max(1, int(batch_size * replacement_ratio))
+
+        replace_indices = rng.sample(range(batch_size), min(num_to_replace, batch_size))
+
+        # Get sequence IDs for the replaced indices if available
+        replaced_seq_ids = None
+        if global_sequence_ids is not None:
+            replaced_seq_ids = [global_sequence_ids[i] for i in replace_indices]
+
+        return replace_indices, replaced_seq_ids
+
+    def _get_injection_indices(self, num_needed, injection_strategy, injection_sequence_ids, step):
+        """
+        Get indices from the injection dataset based on the strategy.
+
+        Args:
+            num_needed: Number of indices needed
+            injection_strategy: Either "random" or a list of indices
+            injection_sequence_ids: List of sequence IDs to inject
+            step: Current training step
+
+        Returns:
+            List of indices from the injection dataset
+        """
+        dataset_size = len(self.injection_dataset)
+
+        # Deterministic RNG based on step for reproducibility
+        rng = random.Random(self.injection_config.seed + step)
+
+        if injection_strategy == "random":
+            # Random selection
+            indices = rng.sample(range(dataset_size), min(num_needed, dataset_size))
+
+            # Handle case where num_needed > dataset_size
+            if num_needed > dataset_size:
+                additional = [rng.randint(0, dataset_size - 1) for _ in range(num_needed - dataset_size)]
+                indices.extend(additional)
+
+            return indices
+
+        elif injection_strategy == "sequence_ids":
+            # Explicit index selection
+            # Filter indices that are within dataset size
+            valid_indices = [i for i in injection_sequence_ids if i < dataset_size]
+
+            if not valid_indices:
+                # Fall back to random if no valid indices
+                logging.warning("No valid injection indices provided, falling back to random selection")
+                return self._get_injection_indices(num_needed, "random", step)
+
+            # If we need more than provided, repeat the indices with wraparound
+            if len(valid_indices) < num_needed:
+                return [valid_indices[i % len(valid_indices)] for i in range(num_needed)]
+
+            return valid_indices
+
+        # Shouldn't happen due to validation
+        return []
+
+    def _inject_sequences(self, batch, step):
+        """
+        Replace sequences in the batch with injection sequences based on configured strategies.
+
+        Args:
+            batch: The original batch dictionary with input_ids, attention_mask, etc.
+            step: The current global step (used for deterministic selection)
+
+        Returns:
+            Modified batch with injected sequences
+        """
+        if self.injection_dataset is None or len(self.injection_dataset) == 0:
+            # No injection dataset available
+            return batch
+
+        # Get batch dimensions
+        batch_size = batch["input_ids"].shape[0]
+
+        # Get the strategy for this step
+        strategy = self.injection_config.get_strategy_for_step(step)
+
+        # Get global sequence IDs from the batch if available
+        global_sequence_ids = batch.get("global_indices", None)
+
+        # Determine which positions to replace
+        replace_indices, replaced_seq_ids = self._get_replacement_indices(
+            batch_size, strategy, global_sequence_ids, step
+        )
+
+        if not replace_indices:  # Nothing to replace
+            return batch
+
+        # Determine which sequences to inject
+        injection_indices = self._get_injection_indices(
+            len(replace_indices), strategy["injection_strategy"], strategy["injection_sequence_ids"], step
+        )
+
+        # Log injection indices if enabled
+        self._log_injection_indices(step, replace_indices, replaced_seq_ids, injection_indices)
+
+        # Replace the selected sequences in-place
+        for i, idx in enumerate(replace_indices):
+            # Get the appropriate injection index (handle case where single index is used)
+            inj_idx = injection_indices[min(i, len(injection_indices) - 1)]
+
+            # Get a sequence from the injection dataset
+            injection_item = self.injection_dataset[inj_idx]
+
+            # Replace input_ids in-place
+            batch["input_ids"][idx].copy_(injection_item["input_ids"])
+
+            # Replace other tensor fields as needed
+            for field in ["attention_mask", "label_mask"]:
+                if field in batch and field in injection_item:
+                    batch[field][idx].copy_(injection_item[field])
+
+        # Log the injection
+        log.info(f"Injected {len(replace_indices)}/{batch_size} sequences at step {step}")
+
+        return batch
+
+    def fit(self):
+        """Main training loop with sequence injection capability."""
+        # Initialize training parameters
+        self._initialize_training()
+
+        # Run initial evaluation if needed
+        self._run_initial_evaluation()
+
+        # Set model to train mode
+        self.dist_model.train()
+
+        # Initialize training state tracking
+        speed_monitor, lr_monitor = self._initialize_monitors()
+        first_batch = True
+
+        # Set up profilers if enabled
+        with self._setup_profilers() as profiler:
+            # Main epoch loop
+            for epoch in range(self.epoch or 0, self.max_epochs):
+                if self._should_stop_training():
+                    break
+
+                # Epoch training loop
+                while True:
+                    try:
+                        # Check for data stage transitions
+                        self._check_data_stage_transition()
+
+                        # Ensure data loader is active
+                        if self.current_stage_loader is None:
+                            raise RuntimeError("No data loader is currently active")
+
+                        # Get next batch
+                        batch = self._get_next_batch()
+                        if batch is None:  # End of epoch
+                            self._end_epoch(epoch)
+                            break
+
+                        # Next step is the one we're about to process
+                        next_step = self.global_step + 1
+
+                        # Check if this is an injection step and we have injection data
+                        if next_step in self.injection_steps and self.injection_dataset is not None:
+                            # Inject sequences before processing
+                            batch = self._inject_sequences(batch, next_step)
+                            # Synchronize to ensure all ranks are aligned
+                            torch.distributed.barrier()
+
+                        # Process batch and update training state
+                        self._process_batch(batch, speed_monitor, lr_monitor, first_batch)
+                        first_batch = False
+
+                        # Update profiler if active
+                        if profiler is not None:
+                            profiler.step()
+
+                        # Collect garbage if needed
+                        self._collect_garbage_if_needed()
+
+                        # Check for stopping conditions
+                        if self._should_stop_training():
+                            break
+
+                    except StopIteration:
+                        # Handle end of dataset
+                        self._end_epoch(epoch)
+                        break
+                    except Exception as e:
+                        # Log unexpected errors but try to save state before raising
+                        log.error(f"Error during training: {e}")
+                        self._emergency_checkpoint()
+                        raise
+
+                # Break out of epoch loop if stopping
+                if self._should_stop_training():
+                    break
+
+            # Save final checkpoint
+            self._save_final_checkpoint()

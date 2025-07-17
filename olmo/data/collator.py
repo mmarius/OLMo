@@ -28,6 +28,7 @@ class DataCollator:
         all_attention_bias = []
         all_label_mask = []
         all_indices = []
+        all_global_indices = []
         all_metadata = []
         all_instance_mask = []
         all_doc_lens = []
@@ -102,6 +103,11 @@ class DataCollator:
             if index is not None:
                 all_indices.append(torch.tensor(index))
 
+            # Global indices
+            global_index = x.get("global_index") if isinstance(x, dict) else None
+            if global_index is not None:
+                all_global_indices.append(torch.tensor(global_index))
+
             # Instance mask.
             instance_mask = x.get("instance_mask") if isinstance(x, dict) else None
             if instance_mask is not None:
@@ -128,6 +134,8 @@ class DataCollator:
             out["label_mask"] = torch.stack(all_label_mask)
         if all_indices:
             out["index"] = torch.stack(all_indices)
+        if all_global_indices:
+            out["global_indices"] = torch.stack(all_global_indices)
         if all_instance_mask:
             out["instance_mask"] = torch.stack(all_instance_mask)
         if all_doc_lens:
