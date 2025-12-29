@@ -1305,6 +1305,9 @@ class EvalConfig(BaseConfig):
     """
     OLMo evaluation configuration.
     """
+    # run_name: Optional[str] = None
+    # epoch: Optional[int] = None
+    # dry_run: bool = False
 
     seed: int = 6198
     """
@@ -1320,6 +1323,11 @@ class EvalConfig(BaseConfig):
     """
     Tokenizer configuration.
     """
+
+    # optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    # """
+    # Optimizer configuration.
+    # """
 
     ddp: Optional[DDPConfig] = None
     """

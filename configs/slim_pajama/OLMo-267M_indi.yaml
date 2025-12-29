@@ -1,4 +1,4 @@
-run_name: OLMo-267M-479 # 267,406,080, 190,335,744 without embeddings
+run_name: OLMo-267M-479-indi # 267,406,080, 190,335,744 without embeddings
 seed: 479 # seed used for weights initialization
 dry_run: false
 
@@ -89,10 +89,10 @@ try_load_latest_save: false # this will search of the latest checkpoint in ${sav
 load_path: null # use this to start from a pre-trained checkpoint
 
 # Unsharded checkpoints (for ddp)
-save_interval: 50 # save interval for sharded checkpoints
-save_interval_unsharded: 50 # save interval for unsharded checkpoints
-save_num_checkpoints_to_keep: 150 # number of sharded checkpoints to keep
-save_num_unsharded_checkpoints_to_keep: 150 # number of unsharded checkpoints to keep
+save_interval: 200 # save interval for sharded checkpoints
+save_interval_unsharded: 200 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 3 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 3 # number of unsharded checkpoints to keep
 
 global_train_batch_size: 1024
 device_train_microbatch_size: 64

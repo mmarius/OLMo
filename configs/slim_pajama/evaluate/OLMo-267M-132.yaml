@@ -1,10 +1,10 @@
-seed: 123
+seed: 132
 
 tokenizer:
-  identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  identifier: /home/mila/a/arkil.patel/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
   truncate_direction: right
 
-load_path: /network/scratch/m/marius.mosbach/olmo/checkpoints/slim_pajama/OLMo-136M-84M-a874c4ac5e47f478/step5000-unsharded
+load_path: /network/scratch/a/arkil.patel/olmo/checkpoints/OLMo_267M_132-243e14c231f38f94/latest-unsharded
 save_folder: ${load_path}
 
 global_eval_batch_size: 50

@@ -1,4 +1,4 @@
-run_name: OLMo-267M-479 # 267,406,080, 190,335,744 without embeddings
+run_name: OLMo-267M-479-decay # 267,406,080, 190,335,744 without embeddings
 seed: 479 # seed used for weights initialization
 dry_run: false
 
@@ -86,13 +86,13 @@ tokenizer:
 save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints/
 save_overwrite: false
 try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
-load_path: null # use this to start from a pre-trained checkpoint
+load_path: /network/scratch/a/arkil.patel/olmo/checkpoints/OLMo_267M_132_Data-1f260e68096783a0/step1000-unsharded # use this to start from a pre-trained checkpoint
 
 # Unsharded checkpoints (for ddp)
-save_interval: 50 # save interval for sharded checkpoints
-save_interval_unsharded: 50 # save interval for unsharded checkpoints
-save_num_checkpoints_to_keep: 150 # number of sharded checkpoints to keep
-save_num_unsharded_checkpoints_to_keep: 150 # number of unsharded checkpoints to keep
+save_interval: 500 # save interval for sharded checkpoints
+save_interval_unsharded: 500 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 10 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 10 # number of unsharded checkpoints to keep
 
 global_train_batch_size: 1024
 device_train_microbatch_size: 64
@@ -111,7 +111,7 @@ max_grad_norm_ratio: null
 speed_monitor:
   window_size: 20
 
-eval_interval: 500
+eval_interval: 200
 eval_subset_num_batches: -1
 device_eval_batch_size: ${device_train_microbatch_size}
 evaluators:

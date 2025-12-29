@@ -1,17 +1,17 @@
-run_name: OLMo-59M-34M # 59,773,184, 34,083,072 without embeddings
+run_name: OLMo-59M-456 # 59,773,184, 34,083,072 without embeddings
 seed: 456 # seed used for weights initialization
 dry_run: false
 
 console_log_interval: 10
 
 wandb:
-  project: counterfactual-training
+  project: scaling_analysis
   entity: siva-reddy-mila-org
-  group: slim-pajama
+  group: 59M
   # tags:
   #   - tiny
   #   - debugging
-  # resume: allow
+  resume: allow
   log_interval: 10
 
 model:
@@ -80,10 +80,10 @@ scheduler:
 
 tokenizer:
   # identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json
-  identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  identifier: /home/mila/a/arkil.patel/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
   truncate_direction: right
 
-save_folder: /network/scratch/m/marius.mosbach/olmo/checkpoints/slim_pajama
+save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints
 save_overwrite: false
 try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
 load_path: null # use this to start from a pre-trained checkpoint
@@ -95,7 +95,7 @@ save_num_checkpoints_to_keep: 5 # number of sharded checkpoints to keep
 save_num_unsharded_checkpoints_to_keep: 5 # number of unsharded checkpoints to keep
 
 global_train_batch_size: 1024
-device_train_microbatch_size: 64
+device_train_microbatch_size: 56
 # 1ep means 1 epoch, 2e12T means 2 trillion tokens
 max_duration: 5154 # steps for 1ep given seq_len=1024 and batch_size=1024
 # stop_at: 1000 # stop after t steps
@@ -132,14 +132,14 @@ evaluators:
   # Downstream evaluations #
   ##########################
 
-  - label: winogrande
-    type: downstream
+  # - label: winogrande
+  #   type: downstream
 
-  - label: openbook_qa
-    type: downstream
+  # - label: openbook_qa
+  #   type: downstream
 
-  - label: rte
-    type: downstream
+  # - label: rte
+  #   type: downstream
 
 data:
   seed: 0 # seed used for shuffling the data

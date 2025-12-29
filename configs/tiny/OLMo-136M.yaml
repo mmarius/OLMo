@@ -1,5 +1,5 @@
-run_name: OLMo-267M-479 # 267,406,080, 190,335,744 without embeddings
-seed: 479 # seed used for weights initialization
+run_name: OLMo-136M-456 # 136,323,584, 84,943,360 without embeddings
+seed: 456 # seed used for weights initialization
 dry_run: false
 
 console_log_interval: 10
@@ -7,7 +7,7 @@ console_log_interval: 10
 wandb:
   project: scaling_analysis
   entity: siva-reddy-mila-org
-  group: 267M
+  group: 136M
   # tags:
   #   - tiny
   #   - debugging
@@ -15,9 +15,9 @@ wandb:
   log_interval: 10
 
 model:
-  d_model: 768
-  n_heads: 12
-  n_layers: 12
+  d_model: 512
+  n_heads: 8
+  n_layers: 8
   mlp_ratio: 8
   weight_tying: false
   alibi: false
@@ -70,32 +70,38 @@ optimizer:
   metrics_log_interval: 10
 
 scheduler:
-  name: constant_with_decay_with_warmup
-  units: steps
-  t_warmup: 300
+  name: cosine_with_warmup
+  t_warmup: 50
   alpha_f: 0.1
   warmup_min_lr: 0
-  t_decay: 1000 # length of the decay phase in steps (applies only to constant_with_decay_with_warmup); ~20% of the total duration
-  decay_type: linear # linear, cosine, sqrt (applies only to constant_with_decay_with_warmup)
+
+# scheduler:
+#   name: constant_with_decay_with_warmup
+#   units: steps
+#   t_warmup: 300
+#   alpha_f: 0.1
+#   warmup_min_lr: 0
+#   t_decay: 1000 # length of the decay phase in steps (applies only to constant_with_decay_with_warmup); ~20% of the total duration
+#   decay_type: linear # linear, cosine, sqrt (applies only to constant_with_decay_with_warmup)
 
 tokenizer:
   # identifier: /home/mila/m/marius.mosbach/projects/olmo/olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json
   identifier: /home/mila/a/arkil.patel/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
   truncate_direction: right
 
-save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints/
+save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints
 save_overwrite: false
 try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
 load_path: null # use this to start from a pre-trained checkpoint
 
 # Unsharded checkpoints (for ddp)
-save_interval: 50 # save interval for sharded checkpoints
-save_interval_unsharded: 50 # save interval for unsharded checkpoints
-save_num_checkpoints_to_keep: 150 # number of sharded checkpoints to keep
-save_num_unsharded_checkpoints_to_keep: 150 # number of unsharded checkpoints to keep
+save_interval: 100 # save interval for sharded checkpoints
+save_interval_unsharded: 100 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 1 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 1 # number of unsharded checkpoints to keep
 
 global_train_batch_size: 1024
-device_train_microbatch_size: 64
+device_train_microbatch_size: 48
 # 1ep means 1 epoch, 2e12T means 2 trillion tokens
 max_duration: 5154 # steps for 1ep given seq_len=1024 and batch_size=1024
 # stop_at: 1000 # stop after t steps
@@ -111,7 +117,7 @@ max_grad_norm_ratio: null
 speed_monitor:
   window_size: 20
 
-eval_interval: 500
+eval_interval: 200
 eval_subset_num_batches: -1
 device_eval_batch_size: ${device_train_microbatch_size}
 evaluators:
@@ -126,7 +132,8 @@ evaluators:
       memmap_dtype: uint32
       datasets:
           slim-pajama-validation:
-            - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy # 8.85M tokens
+            # - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy # 8.85M tokens
+            - /tmp/validation_data/part-0-00000.npy # 8.85M tokens
 
   ##########################
   # Downstream evaluations #
@@ -158,11 +165,19 @@ data:
   #   repetition_max_count: 32
   paths:
     # Dolma encoded version of DKYoon/SlimPajama-6B (5.4B tokens)
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-0-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-1-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-2-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-3-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-4-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-5-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-6-00000.npy
-    - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-7-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-0-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-1-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-2-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-3-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-4-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-5-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-6-00000.npy
+    # - /network/scratch/m/marius.mosbach/olmo/training_data/olmo2/slim_pajama/dolma/part-7-00000.npy
+    - /tmp/training_data/part-0-00000.npy
+    - /tmp/training_data/part-1-00000.npy
+    - /tmp/training_data/part-2-00000.npy
+    - /tmp/training_data/part-3-00000.npy
+    - /tmp/training_data/part-4-00000.npy
+    - /tmp/training_data/part-5-00000.npy
+    - /tmp/training_data/part-6-00000.npy
+    - /tmp/training_data/part-7-00000.npy

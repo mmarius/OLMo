@@ -40,6 +40,9 @@ from olmo.util import (
 )
 import numpy as np
 
+import yaml
+import tempfile
+
 log = logging.getLogger("eval")
 
 
@@ -261,6 +264,18 @@ if __name__ == "__main__":
         yaml_path, args_list = sys.argv[1], sys.argv[2:]
     except IndexError:
         raise OLMoCliError(f"Usage: {sys.argv[0]} [CONFIG_PATH] [OPTIONS]")
+
+    # # Load the YAML file
+    # with open(yaml_path, "r") as file:
+    #     data = yaml.safe_load(file)
+
+    # # Modify a key-value pair
+    # data["load_path"] = data["load_path"] + step_start
+
+    # # Create a temporary YAML file
+    # with tempfile.NamedTemporaryFile(delete=False, suffix=".yaml", mode="w") as temp_file:
+    #     yaml.dump(data, temp_file, default_flow_style=False)
+    #     temp_yaml_path = temp_file.name  # Store the path of the temp file
 
     # load config files
     cfg = EvalConfig.load(yaml_path, [clean_opt(s) for s in args_list])

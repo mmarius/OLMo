@@ -1,5 +1,5 @@
-run_name: OLMo-267M-479 # 267,406,080, 190,335,744 without embeddings
-seed: 479 # seed used for weights initialization
+run_name: OLMo-20M-132 # 59,773,184, 34,083,072 without embeddings
+seed: 132 # seed used for weights initialization
 dry_run: false
 
 console_log_interval: 10
@@ -7,7 +7,7 @@ console_log_interval: 10
 wandb:
   project: scaling_analysis
   entity: siva-reddy-mila-org
-  group: 267M
+  group: slim-pajama
   # tags:
   #   - tiny
   #   - debugging
@@ -15,9 +15,9 @@ wandb:
   log_interval: 10
 
 model:
-  d_model: 768
-  n_heads: 12
-  n_layers: 12
+  d_model: 256
+  n_heads: 8
+  n_layers: 8
   mlp_ratio: 8
   weight_tying: false
   alibi: false
@@ -83,19 +83,19 @@ tokenizer:
   identifier: /home/mila/a/arkil.patel/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
   truncate_direction: right
 
-save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints/
+save_folder: /network/scratch/a/arkil.patel/olmo/checkpoints
 save_overwrite: false
 try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
 load_path: null # use this to start from a pre-trained checkpoint
 
 # Unsharded checkpoints (for ddp)
-save_interval: 50 # save interval for sharded checkpoints
-save_interval_unsharded: 50 # save interval for unsharded checkpoints
-save_num_checkpoints_to_keep: 150 # number of sharded checkpoints to keep
-save_num_unsharded_checkpoints_to_keep: 150 # number of unsharded checkpoints to keep
+save_interval: 200 # save interval for sharded checkpoints
+save_interval_unsharded: 200 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 5 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 5 # number of unsharded checkpoints to keep
 
 global_train_batch_size: 1024
-device_train_microbatch_size: 64
+device_train_microbatch_size: 56
 # 1ep means 1 epoch, 2e12T means 2 trillion tokens
 max_duration: 5154 # steps for 1ep given seq_len=1024 and batch_size=1024
 # stop_at: 1000 # stop after t steps
@@ -111,7 +111,7 @@ max_grad_norm_ratio: null
 speed_monitor:
   window_size: 20
 
-eval_interval: 500
+eval_interval: 200
 eval_subset_num_batches: -1
 device_eval_batch_size: ${device_train_microbatch_size}
 evaluators:
@@ -127,19 +127,6 @@ evaluators:
       datasets:
           slim-pajama-validation:
             - /network/scratch/m/marius.mosbach/olmo/validation_data/olmo2/slim_pajama/dolma/part-0-00000.npy # 8.85M tokens
-
-  ##########################
-  # Downstream evaluations #
-  ##########################
-
-  # - label: winogrande
-  #   type: downstream
-
-  # - label: openbook_qa
-  #   type: downstream
-
-  # - label: rte
-  #   type: downstream
 
 data:
   seed: 0 # seed used for shuffling the data

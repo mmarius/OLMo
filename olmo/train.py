@@ -58,6 +58,8 @@ from .torch_util import (
 )
 from .util import upload
 
+import pdb
+
 __all__ = ["SpeedMonitor", "LRMonitor", "Trainer"]
 
 log = logging.getLogger(__name__)
@@ -728,12 +730,13 @@ class Trainer:
             doc_lens=batch.get("doc_lens"),
             max_doc_lens=batch.get("max_doc_lens"),
         ).logits
-        logits_for_loss = logits[..., :-1, :].contiguous()
+        # pdb.set_trace()
+        logits_for_loss = logits[..., :-1, :].contiguous() # shape: (batch_size, seq_len - 1, vocab_size)
         # shape: (batch_size * seq_len, vocab_size)
         logits_for_loss = logits_for_loss.view(-1, logits_for_loss.size(-1))
-        # shape: (batch_size, seq_len)
+        # shape: (batch_size, seq_len-1)
         labels = self.get_labels(batch)
-        # shape: (batch_size * seq_len,)
+        # shape: (batch_size * seq_len-1,)
         labels = labels.view(-1)
         ce_loss, z_loss = self.loss_fn(
             logits_for_loss, labels, ignore_index=-100, reduction=loss_reduction, compute_z_loss=compute_z_loss
