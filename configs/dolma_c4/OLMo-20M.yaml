@@ -1,0 +1,220 @@
+run_name: OLMo-20M-try
+seed: 479
+dry_run: false
+
+wandb:
+  project: token_scaling
+  entity: siva-reddy-mila-org
+  log_interval: 10
+
+model:
+  d_model: 192
+  n_heads: 8
+  n_layers: 16
+  mlp_ratio: 8
+  weight_tying: false
+  alibi: false
+  rope: true
+  flash_attention: true
+  attention_dropout: 0.0
+  attention_layer_norm: false
+  clip_qkv: null
+  include_bias: false
+  block_type: sequential
+  layer_norm_type: rms
+  layer_norm_with_affine: true
+  layer_norm_eps: 1e-6
+  bias_for_layer_norm: false
+  attention_layer_norm_with_affine: false
+  activation_type: swiglu
+  residual_dropout: 0.0
+  embedding_dropout: 0.0
+  max_sequence_length: 2024
+  vocab_size: 50280
+  embedding_size: 50304
+  eos_token_id: 0
+  pad_token_id: 1
+  # vocab_size: 100278 # OLMo-2 tokenizer
+  # embedding_size: 100352 # OLMo-2 tokenizer
+  # eos_token_id: 100257 # OLMo-2 tokenizer
+  # pad_token_id: 100277 # OLMo-2 tokenizer
+  init_device: cuda
+  init_fn: normal
+  init_std: 0.02
+  init_cutoff_factor: 3
+
+ddp:
+  grad_sync_mode: batch
+  find_unused_params: false
+
+compile: null
+
+optimizer:
+  name: adamw
+  learning_rate: 8.4e-3
+  weight_decay: 0.1
+  eps: 1e-8
+  decay_norm_and_bias: true
+  decay_embeddings: true
+  betas:
+  - 0.9
+  - 0.95
+  metrics_log_interval: 10
+
+scheduler:
+  name: cosine_with_warmup
+  units: steps
+  t_warmup: 729
+  alpha_f: 0.1
+  warmup_min_lr: 0
+
+tokenizer:
+  identifier: /work/OLMo/olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json
+  # identifier: /work/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  truncate_direction: right
+
+save_folder: /work/scratch/olmo/checkpoints/
+save_overwrite: false
+try_load_latest_save: false # this will search of the latest checkpoint in ${save_folder} if true
+load_path: null # use this to start from a pre-trained checkpoint
+
+# Unsharded checkpoints (for ddp)
+save_interval: 500 # save interval for sharded checkpoints
+save_interval_unsharded: 500 # save interval for unsharded checkpoints
+save_num_checkpoints_to_keep: 3 # number of sharded checkpoints to keep
+save_num_unsharded_checkpoints_to_keep: 3 # number of unsharded checkpoints to keep
+
+global_train_batch_size: 64
+device_train_microbatch_size: 16
+max_duration: 14584
+
+precision: amp_bf16
+distributed_strategy: ddp
+
+gen1_gc_interval: 1
+
+max_grad_norm: 1.0
+max_grad_norm_ratio: null
+
+speed_monitor:
+  window_size: 20
+
+eval_interval: 500
+eval_subset_num_batches: 350
+device_eval_batch_size: ${device_train_microbatch_size}
+evaluators:
+  ##########################
+  #    LMing evaluations   #
+  ##########################
+  - label: ppl-validation
+    data:
+      num_workers: 8
+      drop_last: true
+      # generate_doc_lengths: true
+      # memmap_dtype: uint32 # when using OLMo-2 tokenizer
+      datasets:
+          dolma-c4-validation:
+            - /work/scratch/dolma_1_6_c4_validation/part-01-00000.npy
+
+data:
+  seed: 0 # seed used for shuffling the data
+  pad_direction: right
+  num_workers: 8
+  drop_last: true
+  pin_memory: true
+  prefetch_factor: 8
+  persistent_workers: true
+  timeout: 0
+  # memmap_dtype: uint16 # when using the OLMo-1 tokenizer
+  # memmap_dtype: uint32 # when using the OLMo-2 tokenizer
+  # instance_filter:
+  #   repetition_max_period: 13
+  #   repetition_min_period: 1
+  #   repetition_max_count: 32
+  paths:
+    # Dolma encoded version of DKYoon/SlimPajama-6B (5.4B tokens)
+    - /work/scratch/dolma_1_6_c4_training/part-00-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-02-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-03-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-04-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-05-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-06-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-07-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-08-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-09-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-10-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-11-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-12-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-13-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-14-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-15-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-16-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-17-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-18-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-19-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-20-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-21-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-22-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-23-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-24-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-25-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-26-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-27-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-28-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-29-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-30-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-31-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-32-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-33-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-34-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-35-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-36-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-37-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-38-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-39-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-40-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-41-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-42-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-43-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-44-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-45-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-46-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-47-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-48-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-49-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-50-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-51-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-52-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-53-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-54-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-55-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-56-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-57-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-58-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-59-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-60-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-61-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-62-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-63-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-64-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-65-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-66-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-67-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-68-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-69-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-70-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-71-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-72-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-73-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-74-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-75-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-76-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-77-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-78-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-79-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-80-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-81-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-82-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-83-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-84-00000.npy
+    - /work/scratch/dolma_1_6_c4_training/part-85-00000.npy

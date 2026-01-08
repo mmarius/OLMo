@@ -1,0 +1,35 @@
+seed: 479
+
+tokenizer:
+  identifier: /work/OLMo/olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json
+  # identifier: /work/OLMo/olmo_data/tokenizers/allenai_dolma2.json # OLMo-2 tokenizer
+  truncate_direction: right
+
+load_path: /work/scratch/olmo/checkpoints/20M_steps-14584_cosine-05_seed-479-5d6c72a374afe77e/latest-unsharded
+save_folder: ${load_path}
+
+global_eval_batch_size: 64
+device_eval_microbatch_size: 16
+
+precision: amp_bf16
+distributed_strategy: ddp
+init_device: cuda
+
+ddp:
+  grad_sync_mode: batch
+  find_unused_params: false
+
+console_log_interval: 10
+
+device_eval_batch_size: ${device_eval_microbatch_size}
+eval_subset_num_batches: 350
+evaluators:
+  - label: ppl-validation
+    data:
+      num_workers: 8
+      drop_last: true
+      # generate_doc_lengths: true
+      # memmap_dtype: uint32
+      datasets:
+          dolma-c4-validation:
+            - /work/scratch/dolma_1_6_c4_validation/part-01-00000.npy
